@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -18,16 +19,21 @@ class RankerConfig:
     task_type: str = "CPU"
 
 
-def make_pool(frame: pl.DataFrame) -> Pool:
+def make_pool(frame: pl.DataFrame, features: Sequence[str] = FEATURES) -> Pool:
     return Pool(
-        data=frame.select(FEATURES).to_numpy().astype(np.float32),
+        data=frame.select(features).to_numpy().astype(np.float32),
         label=frame["label"].to_numpy() if "label" in frame.columns else None,
         group_id=frame["q"].to_numpy(),
-        feature_names=FEATURES,
+        feature_names=list(features),
     )
 
 
-def train_ranker(train: pl.DataFrame, valid: pl.DataFrame, config: RankerConfig) -> CatBoostRanker:
+def train_ranker(
+    train: pl.DataFrame,
+    valid: pl.DataFrame,
+    config: RankerConfig,
+    features: Sequence[str] = FEATURES,
+) -> CatBoostRanker:
     model = CatBoostRanker(
         loss_function=config.loss_function,
         iterations=config.iterations,
@@ -41,7 +47,7 @@ def train_ranker(train: pl.DataFrame, valid: pl.DataFrame, config: RankerConfig)
         allow_writing_files=False,
         verbose=100,
     )
-    model.fit(make_pool(train), eval_set=make_pool(valid))
+    model.fit(make_pool(train, features), eval_set=make_pool(valid, features))
     return model
 
 
