@@ -11,9 +11,17 @@ import numpy as np
 import polars as pl
 import torch
 
-from candgen.core.data import INPUT_DIR, load_corpus, prepare_queries
+from candgen.core.data import (
+    INPUT_DIR,
+    build_contexts,
+    build_corpus,
+    load_corpus,
+    load_train,
+    prepare_queries,
+)
 from candgen.core.dense import default_device
 from candgen.core.features import FEATURES, ItemTable
+from candgen.core.history import add_history_features, full_view, history_features, history_pairs
 from candgen.core.submission import (
     ANSWER_K,
     answer_frame,
@@ -59,15 +67,34 @@ def git_state() -> dict:
     }
 
 
-def dev_summary(report_name: str) -> dict | None:
-    path = EXPERIMENTS_DIR / f"{report_name}.json"
+def dev_summary(report_name: str, model_path: Path | None = None) -> dict | None:
+    path = (
+        model_path.parent / "report.json" if model_path else EXPERIMENTS_DIR / f"{report_name}.json"
+    )
+    if not path.exists():
+        path = EXPERIMENTS_DIR / f"{report_name}.json"
     if not path.exists():
         return None
     report = json.loads(path.read_text())
+    recall = report["recall"]["@50"] if "recall" in report else report["recall@50"]
     return {
         "report": str(path),
-        "recall@50": report["recall"]["@50"],
-        "pool_recall": report.get("pool_recall", report["recall"]["@1000"]),
+        "recall@50": recall,
+        "pool_recall": report.get("pool_recall", report.get("recall", {}).get("@1000")),
+    }
+
+
+def benchmark_history(timings: dict) -> tuple[pl.DataFrame, dict]:
+    t = time.perf_counter()
+    train = load_train()
+    contexts = build_contexts(train)
+    pairs = history_pairs(contexts, build_corpus(train))
+    timings["history_s"] = time.perf_counter() - t
+    return pairs, {
+        "source": "train.parquet, all parts",
+        "texts": contexts["query_text"].n_unique(),
+        "contexts": contexts.height,
+        "pairs_with_coords": pairs.height,
     }
 
 
@@ -84,7 +111,11 @@ def rank_with_model(
     from candgen.core.ranker import make_pool, select_top
 
     meta = json.loads(model_path.with_suffix(".json").read_text())
-    if meta["features"] != FEATURES or meta["retrieval"] != json.loads(
+    history = meta.get("history") or {}
+    geo, transitions = history.get("geo_history", "none"), history.get("transitions", "none")
+    alpha = history.get("transition_alpha") or 0.0
+    expected = [*FEATURES, *history_features(geo, transitions)]
+    if meta["features"] != expected or meta["retrieval"] != json.loads(
         json.dumps(dataclasses.asdict(config))
     ):
         raise SystemExit(f"{model_path} was trained with a different feature or retrieval config")
@@ -96,14 +127,29 @@ def rank_with_model(
     items = ItemTable(corpus)
     timings["item_table_s"] = time.perf_counter() - t
     frame = pool_features(config, runs, queries, "benchmark", items, item_vectors, timings)
+    history_info = None
+    if geo != "none" or transitions != "none":
+        pairs, history_info = benchmark_history(timings)
+        history_info |= {
+            "geo_history": geo,
+            "transitions": transitions,
+            "transition_alpha": alpha if transitions != "none" else None,
+        }
+        t = time.perf_counter()
+        frame = add_history_features(
+            frame, full_view(queries, pairs), items, geo, transitions, alpha
+        )
+        timings["history_features_s"] = time.perf_counter() - t
+        del pairs
     t = time.perf_counter()
-    scores = model.predict(make_pool(frame))
+    scores = model.predict(make_pool(frame, meta["features"]))
     timings["predict_s"] = time.perf_counter() - t
     rows = select_top(frame, scores, queries.height)
     return rows_to_ids(corpus["item_id"].to_list(), rows), {
         "path": str(model_path),
         "sha256": sha256_file(model_path),
         **meta,
+        "inference_history": history_info,
     }
 
 
@@ -154,7 +200,7 @@ def main() -> None:
         "created": datetime.now().astimezone().isoformat(timespec="seconds"),
         "retrieval": dataclasses.asdict(config),
         "model": model_meta,
-        "dev": dev_summary(report_name),
+        "dev": dev_summary(report_name, args.model),
         "git": git_state(),
         "answer_sha256": sha256_file(path),
         "inputs_sha256": {p.name: sha256_file(p) for p in (QUERIES_PATH, ITEMS_PATH)},
