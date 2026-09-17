@@ -9,8 +9,11 @@ from pathlib import Path
 
 import numpy as np
 import polars as pl
+import torch
 
 from candgen.core.data import INPUT_DIR, load_corpus, prepare_queries
+from candgen.core.dense import default_device
+from candgen.core.features import FEATURES, ItemTable
 from candgen.core.submission import (
     ANSWER_K,
     answer_frame,
@@ -22,6 +25,8 @@ from candgen.scripts.common import EXPERIMENTS_DIR, peak_rss_gb
 from candgen.scripts.runs import (
     RetrievalConfig,
     fuse,
+    load_corpus_embeddings,
+    pool_features,
     retrieve,
     rows_to_ids,
 )
@@ -66,11 +71,50 @@ def dev_summary(report_name: str) -> dict | None:
     }
 
 
+def rank_with_model(
+    model_path: Path,
+    config: RetrievalConfig,
+    corpus: pl.DataFrame,
+    queries: pl.DataFrame,
+    runs: dict,
+    timings: dict,
+) -> tuple[list[list[str]], dict]:
+    from catboost import CatBoostRanker
+
+    from candgen.core.ranker import make_pool, select_top
+
+    meta = json.loads(model_path.with_suffix(".json").read_text())
+    if meta["features"] != FEATURES or meta["retrieval"] != json.loads(
+        json.dumps(dataclasses.asdict(config))
+    ):
+        raise SystemExit(f"{model_path} was trained with a different feature or retrieval config")
+    model = CatBoostRanker()
+    model.load_model(str(model_path))
+    embeddings = load_corpus_embeddings(config.dense_config, "benchmark", corpus, timings)
+    item_vectors = torch.from_numpy(embeddings).to(default_device())
+    t = time.perf_counter()
+    items = ItemTable(corpus)
+    timings["item_table_s"] = time.perf_counter() - t
+    frame = pool_features(config, runs, queries, "benchmark", items, item_vectors, timings)
+    t = time.perf_counter()
+    scores = model.predict(make_pool(frame))
+    timings["predict_s"] = time.perf_counter() - t
+    rows = select_top(frame, scores, queries.height)
+    return rows_to_ids(corpus["item_id"].to_list(), rows), {
+        "path": str(model_path),
+        "sha256": sha256_file(model_path),
+        **meta,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--method", choices=["rrf"], default="rrf")
+    parser.add_argument("--method", choices=["rrf", "catboost"], default="rrf")
+    parser.add_argument("--model", type=Path, default=None)
     parser.add_argument("--tag", default=None)
     args = parser.parse_args()
+    if args.method == "catboost" and args.model is None:
+        parser.error("--model is required for catboost")
     config = RetrievalConfig()
 
     queries = prepare_queries(pl.read_parquet(QUERIES_PATH))
@@ -81,8 +125,15 @@ def main() -> None:
     timings: dict[str, float] = {}
     started = time.perf_counter()
     runs = retrieve(config, "benchmark", corpus, queries, "benchmark", timings)
-    predictions = rows_to_ids(item_ids, fuse(config, runs, timings))
-    report_name = config.report_name("dev")
+    if args.method == "rrf":
+        predictions = rows_to_ids(item_ids, fuse(config, runs, timings))
+        report_name = config.report_name("dev")
+        model_meta = None
+    else:
+        predictions, model_meta = rank_with_model(
+            args.model, config, corpus, queries, runs, timings
+        )
+        report_name = f"catboost_dev_{args.model.stem.removeprefix('ranker_')}"
     timings["total_s"] = time.perf_counter() - started
 
     answer = answer_frame(query_ids, predictions)
@@ -102,6 +153,7 @@ def main() -> None:
         "method": args.method,
         "created": datetime.now().astimezone().isoformat(timespec="seconds"),
         "retrieval": dataclasses.asdict(config),
+        "model": model_meta,
         "dev": dev_summary(report_name),
         "git": git_state(),
         "answer_sha256": sha256_file(path),

@@ -6,9 +6,11 @@ from pathlib import Path
 
 import numpy as np
 import polars as pl
+import torch
 
 from candgen.core import bm25, dense
 from candgen.core.data import ARTIFACTS_DIR
+from candgen.core.features import ItemTable, build_features, candidate_pool
 from candgen.core.retrieval import Hits, rrf_fuse
 
 RUNS_DIR = ARTIFACTS_DIR / "runs"
@@ -200,3 +202,22 @@ def fuse(config: RetrievalConfig, runs: dict[str, Hits], timings: dict) -> list[
 
 def rows_to_ids(item_ids: list[str], rows: Sequence[np.ndarray]) -> list[list[str]]:
     return [[item_ids[r] for r in row.tolist() if r >= 0] for row in rows]
+
+
+def pool_features(
+    config: RetrievalConfig,
+    runs: dict[str, Hits],
+    queries: pl.DataFrame,
+    run_key: str,
+    items: ItemTable,
+    item_vectors: torch.Tensor,
+    timings: dict,
+) -> pl.DataFrame:
+    t = time.perf_counter()
+    pool = candidate_pool(
+        runs, {name: config.list_depth(name) for name in config.list_names()}, config.rrf_k
+    )
+    vectors = query_vectors(config.dense_config, queries, RUNS_DIR / run_key, timings)
+    frame = build_features(pool, queries, items, vectors, item_vectors)
+    timings[f"{run_key}_features_s"] = time.perf_counter() - t
+    return frame
