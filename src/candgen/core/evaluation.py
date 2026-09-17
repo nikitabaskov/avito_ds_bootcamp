@@ -1,7 +1,7 @@
 import numpy as np
 import polars as pl
 
-from candgen.metrics import recall_at_k
+from candgen.core.metrics import recall_at_k
 
 POOL_KS = (50, 100, 300, 1000)
 

@@ -111,3 +111,13 @@ def sample_eval_queries(
 
 def build_corpus(train: pl.DataFrame) -> pl.DataFrame:
     return train.select(ITEM_COLS).unique("item_id", keep="first").sort("item_id")
+
+
+def load_corpus(name: str) -> pl.DataFrame:
+    if name == "split":
+        return pl.read_parquet(SPLIT_DIR / "corpus.parquet")
+    if name == "benchmark":
+        return (
+            pl.read_parquet(INPUT_DIR / "benchmark_items.parquet").select(ITEM_COLS).sort("item_id")
+        )
+    raise ValueError(f"unknown corpus: {name}")

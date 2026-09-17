@@ -1,7 +1,7 @@
 import polars as pl
 import pytest
 
-from candgen.data import assign_parts, build_contexts, prepare_queries, sample_eval_queries
+from candgen.core.data import assign_parts, build_contexts, prepare_queries, sample_eval_queries
 
 
 def pairs() -> pl.DataFrame:

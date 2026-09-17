@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from candgen.metrics import recall_at_k
+from candgen.core.metrics import recall_at_k
 
 
 def test_assignment_example():

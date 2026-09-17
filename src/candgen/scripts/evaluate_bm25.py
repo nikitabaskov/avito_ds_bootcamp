@@ -1,14 +1,10 @@
 import argparse
 import dataclasses
-import json
-import resource
 import time
 
-import polars as pl
-
-from candgen.bm25 import BM25Config, BM25Retriever, item_documents, query_texts
-from candgen.data import ARTIFACTS_DIR, SPLIT_DIR
-from candgen.evaluation import POOL_KS, recall_report
+from candgen.core.bm25 import BM25Config, BM25Retriever, item_documents, query_texts
+from candgen.core.evaluation import POOL_KS, recall_report
+from candgen.scripts.common import load_eval, peak_rss_gb, write_report
 
 
 def main() -> None:
@@ -23,11 +19,7 @@ def main() -> None:
         k1=args.k1, b=args.b, title_repeat=args.title_repeat, query_filters=args.query_filters
     )
 
-    corpus = pl.read_parquet(SPLIT_DIR / "corpus.parquet")
-    queries = pl.read_parquet(SPLIT_DIR / f"eval_{args.part}.parquet")
-    seen_items = set(
-        pl.read_parquet(SPLIT_DIR / "contexts_train.parquet")["item_ids"].explode().unique()
-    )
+    corpus, queries, seen_items = load_eval(args.part)
     item_ids = corpus["item_id"].to_list()
 
     timings = {}
@@ -48,13 +40,9 @@ def main() -> None:
         "corpus_items": corpus.height,
         **recall_report(queries, candidates, seen_items),
         "timings": timings,
-        "peak_rss_gb": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024**2,
+        "peak_rss_gb": peak_rss_gb(),
     }
-    tag = f"t{config.title_repeat}{'_qf' if config.query_filters else ''}_k{config.k1}_b{config.b}"
-    out = ARTIFACTS_DIR / "experiments" / f"bm25_{args.part}_{tag}.json"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(report, indent=2, ensure_ascii=False))
-    print(json.dumps(report, indent=2, ensure_ascii=False))
+    write_report(f"bm25_{args.part}_{config.tag()}", report)
 
 
 if __name__ == "__main__":

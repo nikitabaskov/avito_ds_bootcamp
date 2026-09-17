@@ -2,7 +2,7 @@ import json
 
 import polars as pl
 
-from candgen.data import (
+from candgen.core.data import (
     EVAL_QUERIES_PER_PART,
     SEED,
     SPLIT_DIR,
