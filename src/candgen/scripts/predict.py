@@ -1,0 +1,121 @@
+import argparse
+import dataclasses
+import json
+import re
+import subprocess
+import time
+from datetime import datetime
+from pathlib import Path
+
+import numpy as np
+import polars as pl
+
+from candgen.core.data import INPUT_DIR, load_corpus, prepare_queries
+from candgen.core.submission import (
+    ANSWER_K,
+    answer_frame,
+    read_answer,
+    sha256_file,
+    validate_answer,
+)
+from candgen.scripts.common import EXPERIMENTS_DIR, peak_rss_gb
+from candgen.scripts.runs import (
+    RetrievalConfig,
+    fuse,
+    retrieve,
+    rows_to_ids,
+)
+
+OUTPUT_DIR = Path("data/output")
+QUERIES_PATH = INPUT_DIR / "benchmark_queries.parquet"
+ITEMS_PATH = INPUT_DIR / "benchmark_items.parquet"
+
+
+def next_output_dir(tag: str) -> Path:
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    taken = [int(p.name[:3]) for p in OUTPUT_DIR.iterdir() if re.match(r"\d{3}_", p.name)]
+    path = (
+        OUTPUT_DIR
+        / f"{max(taken, default=0) + 1:03d}_{datetime.now().astimezone():%Y%m%d-%H%M%S}_{tag}"
+    )
+    path.mkdir()
+    return path
+
+
+def git_state() -> dict:
+    def git(*args: str) -> str:
+        return subprocess.run(
+            ["git", *args], capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+    return {
+        "commit": git("rev-parse", "HEAD"),
+        "dirty": bool(git("status", "--porcelain", "--", "src", "pyproject.toml", "uv.lock")),
+    }
+
+
+def dev_summary(report_name: str) -> dict | None:
+    path = EXPERIMENTS_DIR / f"{report_name}.json"
+    if not path.exists():
+        return None
+    report = json.loads(path.read_text())
+    return {
+        "report": str(path),
+        "recall@50": report["recall"]["@50"],
+        "pool_recall": report.get("pool_recall", report["recall"]["@1000"]),
+    }
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--method", choices=["rrf"], default="rrf")
+    parser.add_argument("--tag", default=None)
+    args = parser.parse_args()
+    config = RetrievalConfig()
+
+    queries = prepare_queries(pl.read_parquet(QUERIES_PATH))
+    corpus = load_corpus("benchmark")
+    item_ids = corpus["item_id"].to_list()
+    query_ids = queries["query_id"].to_list()
+
+    timings: dict[str, float] = {}
+    started = time.perf_counter()
+    runs = retrieve(config, "benchmark", corpus, queries, "benchmark", timings)
+    predictions = rows_to_ids(item_ids, fuse(config, runs, timings))
+    report_name = config.report_name("dev")
+    timings["total_s"] = time.perf_counter() - started
+
+    answer = answer_frame(query_ids, predictions)
+    errors = validate_answer(answer, query_ids, item_ids)
+    if errors:
+        raise SystemExit("invalid answer:\n" + "\n".join(errors[:20]))
+
+    out_dir = next_output_dir(args.tag or args.method)
+    path = out_dir / "answer.csv"
+    answer.write_csv(path)
+    written = read_answer(path)
+    if not written.equals(answer) or validate_answer(written, query_ids, item_ids):
+        raise SystemExit(f"{path} does not round-trip")
+
+    sizes = np.array([len(p[:ANSWER_K]) for p in predictions])
+    meta = {
+        "method": args.method,
+        "created": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "retrieval": dataclasses.asdict(config),
+        "dev": dev_summary(report_name),
+        "git": git_state(),
+        "answer_sha256": sha256_file(path),
+        "inputs_sha256": {p.name: sha256_file(p) for p in (QUERIES_PATH, ITEMS_PATH)},
+        "queries": len(query_ids),
+        "corpus_items": corpus.height,
+        "answer_sizes": {"min": int(sizes.min()), "mean": float(sizes.mean())},
+        "timings": timings,
+        "peak_rss_gb": peak_rss_gb(),
+    }
+    (out_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False))
+    print(json.dumps(meta, indent=2, ensure_ascii=False))
+    print(f"saved {path}")
+
+
+if __name__ == "__main__":
+    main()
