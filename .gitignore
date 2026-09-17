@@ -6,7 +6,11 @@ dist/
 wheels/
 *.egg-info
 
+.ipynb_checkpoints/
+
 # Virtual environments
 .venv
 
 data
+PROJECT_PLAN.md
+CLAUDE.md
