@@ -97,13 +97,24 @@ def build_contexts(pairs: pl.DataFrame) -> pl.DataFrame:
 def sample_eval_queries(
     contexts: pl.DataFrame, n: int = EVAL_QUERIES_PER_PART, seed: int = SEED
 ) -> pl.DataFrame:
-    return (
-        contexts.with_columns(
-            order=pl.Series(stable_hash(contexts["query_id"], seed), dtype=pl.UInt64)
+    texts = contexts["query_text"].unique()
+    picked = (
+        pl.DataFrame(
+            {
+                "query_text": texts,
+                "order": pl.Series(
+                    stable_hash((f"text\x1f{t}" for t in texts), seed), dtype=pl.UInt64
+                ),
+            }
         )
-        .sort("order")
-        .unique("query_text", keep="first", maintain_order=True)
+        .sort("order", "query_text")
         .head(n)
+    )
+    chosen = contexts.join(picked.select("query_text"), on="query_text", how="semi")
+    return (
+        chosen.with_columns(order=pl.Series(stable_hash(chosen["query_id"], seed), dtype=pl.UInt64))
+        .sort("order", "query_id")
+        .unique("query_text", keep="first", maintain_order=True)
         .drop("order")
         .sort("query_id")
     )

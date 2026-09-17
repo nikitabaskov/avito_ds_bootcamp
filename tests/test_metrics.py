@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
 
+from candgen.core.evaluation import paired_bootstrap
 from candgen.core.metrics import recall_at_k
 
 
@@ -31,3 +32,11 @@ def test_rejects_empty_relevant_and_length_mismatch():
         recall_at_k([["a"]], [set()], 50)
     with pytest.raises(ValueError):
         recall_at_k([["a"]], [{"a"}, {"b"}], 50)
+
+
+def test_paired_bootstrap_ci_contains_mean_difference():
+    rng = np.random.default_rng(0)
+    base = rng.random(500)
+    result = paired_bootstrap(base + 0.1, base, n=200)
+    assert result["diff"] == pytest.approx(0.1)
+    assert result["ci95"][0] == pytest.approx(0.1) and result["ci95"][1] == pytest.approx(0.1)

@@ -45,3 +45,13 @@ def recall_report(queries: pl.DataFrame, candidates: list[list[str]], seen_items
         "empty_pool_queries": int(sum(not c for c in candidates)),
         "slices": slices,
     }
+
+
+def paired_bootstrap(
+    candidate: np.ndarray, baseline: np.ndarray, n: int = 5000, seed: int = 42
+) -> dict:
+    diff = candidate - baseline
+    idx = np.random.default_rng(seed).integers(0, len(diff), (n, len(diff)))
+    means = diff[idx].mean(axis=1)
+    low, high = np.percentile(means, [2.5, 97.5])
+    return {"diff": float(diff.mean()), "ci95": [float(low), float(high)], "resamples": n}

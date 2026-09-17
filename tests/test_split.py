@@ -45,3 +45,29 @@ def test_eval_sample_takes_one_context_per_text():
     assert sample["query_text"].is_unique().all()
     assert sample.height == 2
     assert sample.equals(sample_eval_queries(build_contexts(pairs()), n=10, seed=3))
+
+
+def test_eval_sample_text_choice_ignores_context_count():
+    def contexts(heavy_contexts: int) -> pl.DataFrame:
+        texts = ["heavy"] * heavy_contexts + [f"text {i}" for i in range(200)]
+        locations = list(range(heavy_contexts)) + [0] * 200
+        return build_contexts(
+            prepare_queries(
+                pl.DataFrame(
+                    {
+                        "search_query": texts,
+                        "search_location_id": locations,
+                        "search_is_delivery_search": 0,
+                        "search_infm_params_text": "",
+                        "search_category": 114,
+                        "item_id": "i",
+                    }
+                )
+            )
+        )
+
+    for seed in range(20):
+        light = sample_eval_queries(contexts(1), n=50, seed=seed)
+        heavy = sample_eval_queries(contexts(300), n=50, seed=seed)
+        assert light["query_text"].sort().equals(heavy["query_text"].sort())
+        assert heavy["query_text"].is_unique().all()
