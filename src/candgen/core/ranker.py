@@ -42,8 +42,8 @@ def train_ranker(
         random_seed=config.random_seed,
         task_type=config.task_type,
         eval_metric="RecallAt:top=50",
-        early_stopping_rounds=config.early_stopping_rounds,
-        use_best_model=True,
+        early_stopping_rounds=config.early_stopping_rounds or None,
+        use_best_model=config.early_stopping_rounds > 0,
         allow_writing_files=False,
         verbose=100,
     )

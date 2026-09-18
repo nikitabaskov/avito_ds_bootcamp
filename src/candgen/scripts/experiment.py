@@ -12,7 +12,7 @@ from catboost import CatBoostRanker
 from candgen.core.data import SEED, SPLIT_DIR, sample_eval_queries, stable_hash
 from candgen.core.dense import default_device
 from candgen.core.diagnostics import error_map, positive_outcomes, query_outcomes
-from candgen.core.evaluation import paired_bootstrap, recall_report
+from candgen.core.evaluation import compare_per_query, recall_report
 from candgen.core.features import ItemTable, attach_labels
 from candgen.core.fields import FIELD_FEATURES, FIELD_MODES, FieldScorer
 from candgen.core.history import (
@@ -27,6 +27,7 @@ from candgen.core.history import (
     location_centers,
     query_centers,
 )
+from candgen.core.metrics import recall_at_k
 from candgen.core.ranker import RankerConfig, make_pool, select_top, train_ranker
 from candgen.scripts.common import EXPERIMENTS_DIR, load_eval, peak_rss_gb
 from candgen.scripts.predict import git_state
@@ -42,6 +43,7 @@ PROTOCOL = "v1"
 B0 = "EXP-000/b0"
 VALID_BASE_QUERIES = 6000
 VALID_SHARE = 0.1
+TREE_POINTS = (10, 25, 50, 100, 200, 300, 500, 750, 1000, 1500, 2000)
 VALID_TEXTS_PATH = SPLIT_DIR / "ranker_valid_texts.parquet"
 
 
@@ -137,14 +139,31 @@ def compare(per_query: pl.DataFrame, reference: str) -> dict | None:
     path = EXPERIMENTS_DIR / reference / "per_query.parquet"
     if not path.exists():
         return None
-    ref = pl.read_parquet(path).select("query_id", ref_recall="recall")
-    joined = per_query.select("query_id", "recall").join(ref, on="query_id", how="full")
-    if joined["query_id"].null_count() or joined["query_id_right"].null_count():
-        raise SystemExit(f"{reference} was evaluated on different queries")
+    try:
+        return {"reference": reference, **compare_per_query(per_query, pl.read_parquet(path))}
+    except ValueError as error:
+        raise SystemExit(f"{reference}: {error}") from error
+
+
+def tree_curve(
+    model: CatBoostRanker,
+    frame: pl.DataFrame,
+    features: list[str],
+    queries: pl.DataFrame,
+    item_ids: list[str],
+) -> dict:
+    trees = model.tree_count_
+    points = [n for n in TREE_POINTS if n < trees] + [trees]
+    pool = make_pool(frame, features)
+    relevant = queries["item_ids"].to_list()
+    dev = {}
+    for n in points:
+        rows = select_top(frame, model.predict(pool, ntree_end=n), queries.height)
+        dev[n] = float(recall_at_k(rows_to_ids(item_ids, rows), relevant, 50).mean())
+    valid = model.get_evals_result().get("validation", {}).get("RecallAt:top=50", [])
     return {
-        "reference": reference,
-        "reference_recall@50": float(joined["ref_recall"].mean()),
-        **paired_bootstrap(joined["recall"].to_numpy(), joined["ref_recall"].to_numpy()),
+        "dev_recall@50": dev,
+        "valid_recall@50": {n: float(valid[n - 1]) for n in points if n <= len(valid)},
     }
 
 
@@ -211,6 +230,9 @@ def main() -> None:
     parser.add_argument("--learning-rate", type=float, default=RankerConfig.learning_rate)
     parser.add_argument("--depth", type=int, default=RankerConfig.depth)
     parser.add_argument("--seed", type=int, default=RankerConfig.random_seed)
+    parser.add_argument(
+        "--early-stopping-rounds", type=int, default=RankerConfig.early_stopping_rounds
+    )
     parser.add_argument("--task-type", choices=["CPU", "GPU"], default=RankerConfig.task_type)
     parser.add_argument("--examples", type=int, default=30)
     args = parser.parse_args()
@@ -239,6 +261,7 @@ def main() -> None:
         depth=args.depth,
         random_seed=args.seed,
         task_type=args.task_type,
+        early_stopping_rounds=args.early_stopping_rounds,
     )
 
     started = time.perf_counter()
@@ -339,6 +362,7 @@ def main() -> None:
     timings["dev_predict_s"] = time.perf_counter() - t
     selected_rows = select_top(dev_frame, scores, dev_queries.height)
     selected = rows_to_ids(item_ids, selected_rows)
+    curve = tree_curve(model, dev_frame, features, dev_queries, item_ids) if train_info else None
 
     positives = positive_outcomes(dev_queries, dev_frame, scores, items, item_ids, seen_items)
     per_query = query_outcomes(positives)
@@ -380,6 +404,7 @@ def main() -> None:
             },
         },
         "error_map": error_map(positives),
+        "tree_curve": curve,
         "feature_importance": dict(
             sorted(
                 zip(
