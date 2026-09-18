@@ -9,8 +9,8 @@ import numpy as np
 import polars as pl
 import torch
 
-from candgen.core import bm25, crossenc, dense
-from candgen.core.data import ARTIFACTS_DIR
+from candgen.core import bm25, crossenc, dense, signals
+from candgen.core.data import ARTIFACTS_DIR, load_corpus
 from candgen.core.features import FEATURES, ItemTable, build_features, candidate_pool, list_features
 from candgen.core.history import HistoryView
 from candgen.core.microcats import MicrocatIndex, add_microcat_features
@@ -196,6 +196,50 @@ def microcat_features(
     t = time.perf_counter()
     frame = add_microcat_features(frame, views, index, vectors, corpus["item_microcat_id"])
     timings[f"{run_key}_microcats_s"] = time.perf_counter() - t
+    return frame
+
+
+def signal_features(
+    config: dense.DenseConfig,
+    index: MicrocatIndex | None,
+    frame: pl.DataFrame,
+    views: list[HistoryView] | None,
+    queries: pl.DataFrame,
+    corpus: pl.DataFrame,
+    item_vectors: torch.Tensor,
+    run_key: str,
+    timings: dict,
+    centroid: bool,
+    filters: bool,
+) -> pl.DataFrame:
+    t = time.perf_counter()
+    if centroid:
+        if index is None or views is None:
+            raise ValueError("neighbor centroid needs the microcat index and history views")
+        history = load_corpus("split")
+        history_vectors = torch.from_numpy(
+            load_corpus_embeddings(config, "split", history, timings)
+        ).to(item_vectors.device)
+        vectors = text_vectors(
+            config, queries["query_text"].to_list(), RUNS_DIR / run_key / "e5_texts.npz", timings
+        )
+        frame = signals.add_centroid_features(
+            frame,
+            views,
+            index,
+            vectors,
+            history_vectors,
+            {item: i for i, item in enumerate(history["item_id"].to_list())},
+            item_vectors,
+        )
+        del history_vectors
+    if filters:
+        frame = signals.add_filter_features(
+            frame,
+            queries["search_infm_params_text"].to_list(),
+            corpus["item_infm_params_text"].fill_null(""),
+        )
+    timings[f"{run_key}_signals_s"] = time.perf_counter() - t
     return frame
 
 

@@ -30,6 +30,7 @@ from candgen.core.history import (
 from candgen.core.metrics import recall_at_k
 from candgen.core.microcats import MICROCAT_FEATURES, MICROCAT_MODES, MicrocatIndex
 from candgen.core.ranker import RankerConfig, full_recall_curve, make_pool, select_top, train_ranker
+from candgen.core.signals import CENTROID_FEATURES, FILTER_FEATURES
 from candgen.scripts.common import EXPERIMENTS_DIR, load_eval, peak_rss_gb
 from candgen.scripts.predict import git_state
 from candgen.scripts.runs import (
@@ -41,6 +42,7 @@ from candgen.scripts.runs import (
     pool_features,
     retrieve,
     rows_to_ids,
+    signal_features,
 )
 
 PROTOCOL = "v2"
@@ -117,6 +119,19 @@ def train_model(
     )
     frame = microcat_features(
         retrieval.dense_config, index, frame, views, train_queries, corpus, train_key, timings
+    )
+    frame = signal_features(
+        retrieval.dense_config,
+        index,
+        frame,
+        views,
+        train_queries,
+        corpus,
+        item_vectors,
+        train_key,
+        timings,
+        args.neighbor_centroid,
+        args.filter_match,
     )
     frame = attach_labels(
         frame,
@@ -256,6 +271,8 @@ def main() -> None:
     parser.add_argument("--geo-damping", action="store_true")
     parser.add_argument("--field-scores", choices=FIELD_MODES, default="none")
     parser.add_argument("--microcats", choices=MICROCAT_MODES, default="none")
+    parser.add_argument("--neighbor-centroid", action="store_true")
+    parser.add_argument("--filter-match", action="store_true")
     parser.add_argument("--global-k", type=int, default=RetrievalConfig.global_k)
     parser.add_argument("--local-k", type=int, default=RetrievalConfig.local_k)
     parser.add_argument("--radius-km", type=float, default=RetrievalConfig.radius_km)
@@ -289,11 +306,15 @@ def main() -> None:
         parser.error("--radius-k needs a positive --radius-km")
     if args.geo_damping and args.geo_history == "none":
         parser.error("--geo-damping needs --geo-history")
+    if args.neighbor_centroid and args.microcats == "none":
+        parser.error("--neighbor-centroid needs --microcats")
     available = [
         *retrieval.features(),
         *FIELD_FEATURES[args.field_scores],
         *history_features(args.geo_history, args.transitions, args.geo_damping),
         *MICROCAT_FEATURES[args.microcats],
+        *(CENTROID_FEATURES if args.neighbor_centroid else []),
+        *(FILTER_FEATURES if args.filter_match else []),
     ]
     unknown = set(args.drop_features) - set(available)
     if unknown:
@@ -374,6 +395,20 @@ def main() -> None:
     dev_frame = microcat_features(
         retrieval.dense_config, index, dev_frame, dev_views, dev_queries, corpus, "dev", timings
     )
+    dev_frame = signal_features(
+        retrieval.dense_config,
+        index,
+        dev_frame,
+        dev_views,
+        dev_queries,
+        corpus,
+        item_vectors,
+        "dev",
+        timings,
+        args.neighbor_centroid,
+        args.filter_match,
+    )
+    signal_info = {"centroid": args.neighbor_centroid, "filters": args.filter_match}
 
     out_dir.mkdir(parents=True, exist_ok=True)
     if args.model is not None:
@@ -409,6 +444,7 @@ def main() -> None:
             "history": history_info,
             "field_scores": args.field_scores,
             "microcats": args.microcats,
+            "signals": signal_info,
         }
         model_path.with_suffix(".json").write_text(
             json.dumps(model_meta, indent=2, ensure_ascii=False)
@@ -442,6 +478,7 @@ def main() -> None:
         "history": history_info,
         "field_scores": args.field_scores,
         "microcats": args.microcats,
+        "signals": signal_info,
         "retrieval": dataclasses.asdict(retrieval),
         "ranker": dataclasses.asdict(ranker) if train_info else None,
         "model": {"path": str(model_path), **model_meta},

@@ -30,6 +30,7 @@ from candgen.core.history import (
     query_centers,
 )
 from candgen.core.microcats import MICROCAT_FEATURES
+from candgen.core.signals import CENTROID_FEATURES, FILTER_FEATURES
 from candgen.core.submission import (
     ANSWER_K,
     answer_frame,
@@ -47,6 +48,7 @@ from candgen.scripts.runs import (
     pool_features,
     retrieve,
     rows_to_ids,
+    signal_features,
 )
 
 OUTPUT_DIR = Path("data/output")
@@ -133,6 +135,8 @@ def feature_spec(meta: dict) -> dict:
         "damping": history.get("geo_damping", False),
         "fields": meta.get("field_scores", "none"),
         "microcats": meta.get("microcats", "none"),
+        "centroid": (meta.get("signals") or {}).get("centroid", False),
+        "filters": (meta.get("signals") or {}).get("filters", False),
     }
 
 
@@ -142,6 +146,8 @@ def expected_features(spec: dict, config: RetrievalConfig) -> list[str]:
         *FIELD_FEATURES[spec["fields"]],
         *history_features(spec["geo"], spec["transitions"], spec["damping"]),
         *MICROCAT_FEATURES[spec["microcats"]],
+        *(CENTROID_FEATURES if spec["centroid"] else []),
+        *(FILTER_FEATURES if spec["filters"] else []),
     ]
 
 
@@ -172,7 +178,6 @@ def feature_frame(
     embeddings = load_corpus_embeddings(config.dense_config, corpus_name, corpus, timings)
     item_vectors = torch.from_numpy(embeddings).to(default_device())
     frame = pool_features(config, runs, queries, run_key, items, item_vectors, timings)
-    del item_vectors
     t = time.perf_counter()
     frame = FieldScorer(corpus, spec["fields"]).add(frame, queries)
     timings["field_scores_s"] = time.perf_counter() - t
@@ -188,12 +193,25 @@ def feature_frame(
             spec["damping"],
         )
         timings["history_features_s"] = time.perf_counter() - t
+    index = None
     if spec["microcats"] != "none":
         index = microcat_index(config.dense_config, pairs, timings, exact_prior)
         frame = microcat_features(
             config.dense_config, index, frame, views, queries, corpus, run_key, timings
         )
-    return frame
+    return signal_features(
+        config.dense_config,
+        index,
+        frame,
+        views,
+        queries,
+        corpus,
+        item_vectors,
+        run_key,
+        timings,
+        spec["centroid"],
+        spec["filters"],
+    )
 
 
 def rank_with_model(
