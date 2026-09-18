@@ -47,6 +47,15 @@ def recall_report(queries: pl.DataFrame, candidates: list[list[str]], seen_items
     }
 
 
+def pool_rows(pool: pl.DataFrame, n_queries: int) -> list[np.ndarray]:
+    out = [np.empty(0, dtype=np.int64) for _ in range(n_queries)]
+    for q, rows in (
+        pool.sort("q", "rrf_rank").group_by("q", maintain_order=True).agg("row").iter_rows()
+    ):
+        out[q] = np.array(rows, dtype=np.int64)
+    return out
+
+
 def paired_bootstrap(
     candidate: np.ndarray, baseline: np.ndarray, n: int = 5000, seed: int = 42
 ) -> dict:

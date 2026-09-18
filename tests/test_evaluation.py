@@ -1,7 +1,7 @@
 import polars as pl
 import pytest
 
-from candgen.core.evaluation import average_seed_metrics, compare_per_query
+from candgen.core.evaluation import average_seed_metrics, compare_per_query, pool_rows
 
 
 def test_compare_per_query_reports_verdicts_and_slices():
@@ -43,3 +43,12 @@ def test_seed_metrics_align_queries_and_reject_context_changes():
         average_seed_metrics([first, second.with_columns(has_center=pl.lit(True))])
     with pytest.raises(ValueError, match="duplicate query_id"):
         average_seed_metrics([pl.concat([first, first])])
+
+
+def test_pool_rows_follow_rrf_rank_and_keep_empty_queries():
+    pool = pl.DataFrame(
+        {"q": [2, 0, 0], "row": [7, 5, 3], "rrf_rank": [1.0, 2.0, 1.0]},
+        schema={"q": pl.Int32, "row": pl.Int64, "rrf_rank": pl.Float32},
+    )
+    rows = pool_rows(pool, 3)
+    assert [r.tolist() for r in rows] == [[3, 5], [], [7]]

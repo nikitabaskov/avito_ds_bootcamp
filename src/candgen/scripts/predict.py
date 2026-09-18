@@ -19,7 +19,7 @@ from candgen.core.data import (
     load_train,
     prepare_queries,
 )
-from candgen.core.dense import default_device
+from candgen.core.dense import DenseConfig, default_device
 from candgen.core.features import ItemTable
 from candgen.core.fields import FIELD_FEATURES, FieldScorer
 from candgen.core.history import (
@@ -110,8 +110,10 @@ def benchmark_history(timings: dict) -> tuple[pl.DataFrame, dict]:
 
 def model_config(meta: dict) -> RetrievalConfig:
     saved = meta["retrieval"]
+    query_filters = saved.get("dense_config", {}).get("query_filters", True)
     config = RetrievalConfig(
-        **{k: saved[k] for k in ("global_k", "local_k", "radius_km", "radius_k") if k in saved}
+        **{k: saved[k] for k in ("global_k", "local_k", "radius_km", "radius_k") if k in saved},
+        dense_config=DenseConfig(query_filters=query_filters),
     )
     current = json.loads(json.dumps(dataclasses.asdict(config)))
     if {k: current[k] for k in saved} != saved or set(current) - set(saved) - {

@@ -10,7 +10,7 @@ import torch
 from catboost import CatBoostRanker
 
 from candgen.core.data import SEED, SPLIT_DIR, sample_eval_queries, stable_hash
-from candgen.core.dense import default_device
+from candgen.core.dense import DenseConfig, default_device
 from candgen.core.diagnostics import error_map, positive_outcomes, query_outcomes
 from candgen.core.evaluation import compare_per_query, recall_report
 from candgen.core.features import ItemTable, attach_labels
@@ -259,6 +259,7 @@ def main() -> None:
     parser.add_argument("--local-k", type=int, default=RetrievalConfig.local_k)
     parser.add_argument("--radius-km", type=float, default=RetrievalConfig.radius_km)
     parser.add_argument("--radius-k", type=int, default=RetrievalConfig.radius_k)
+    parser.add_argument("--e5-query-no-filters", action="store_true")
     parser.add_argument("--train-queries", type=int, default=VALID_BASE_QUERIES)
     parser.add_argument("--iterations", type=int, default=TREES)
     parser.add_argument("--loss-function", default=RankerConfig.loss_function)
@@ -281,6 +282,7 @@ def main() -> None:
         local_k=args.local_k,
         radius_km=args.radius_km,
         radius_k=args.radius_k,
+        dense_config=DenseConfig(query_filters=not args.e5_query_no_filters),
     )
     if retrieval.radius_k and retrieval.radius_km <= 0:
         parser.error("--radius-k needs a positive --radius-km")
