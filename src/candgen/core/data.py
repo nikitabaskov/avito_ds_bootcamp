@@ -132,3 +132,12 @@ def load_corpus(name: str) -> pl.DataFrame:
             pl.read_parquet(INPUT_DIR / "benchmark_items.parquet").select(ITEM_COLS).sort("item_id")
         )
     raise ValueError(f"unknown corpus: {name}")
+
+
+def repeated_text_queries(
+    contexts: pl.DataFrame, excluded_texts: pl.Series, n: int, seed: int = SEED
+) -> pl.DataFrame:
+    repeated = contexts.filter(~pl.col("query_text").is_in(excluded_texts.implode())).filter(
+        pl.len().over("query_text") >= 2
+    )
+    return sample_eval_queries(repeated, n, seed)
