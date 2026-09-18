@@ -37,6 +37,7 @@ def history_pairs(contexts: pl.DataFrame, corpus: pl.DataFrame) -> pl.DataFrame:
     item_frame = corpus.select(
         "item_id",
         "item_location_id",
+        "item_microcat_id",
         lat=pl.col("item_latitude").cast(pl.Float64),
         lon=pl.col("item_longitude").cast(pl.Float64),
     )

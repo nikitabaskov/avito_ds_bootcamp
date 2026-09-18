@@ -29,6 +29,7 @@ from candgen.core.history import (
     history_pairs,
     query_centers,
 )
+from candgen.core.microcats import MICROCAT_FEATURES
 from candgen.core.submission import (
     ANSWER_K,
     answer_frame,
@@ -41,6 +42,8 @@ from candgen.scripts.runs import (
     RetrievalConfig,
     fuse,
     load_corpus_embeddings,
+    microcat_features,
+    microcat_index,
     pool_features,
     retrieve,
     rows_to_ids,
@@ -135,7 +138,13 @@ def rank_with_model(
     geo, transitions = history.get("geo_history", "none"), history.get("transitions", "none")
     alpha = history.get("transition_alpha") or 0.0
     fields = meta.get("field_scores", "none")
-    expected = [*config.features(), *FIELD_FEATURES[fields], *history_features(geo, transitions)]
+    microcats = meta.get("microcats", "none")
+    expected = [
+        *config.features(),
+        *FIELD_FEATURES[fields],
+        *history_features(geo, transitions),
+        *MICROCAT_FEATURES[microcats],
+    ]
     if meta["features"] != expected:
         raise SystemExit(f"{model_path} was trained with a different feature set")
     model = CatBoostRanker()
@@ -144,12 +153,13 @@ def rank_with_model(
     items = ItemTable(corpus)
     timings["item_table_s"] = time.perf_counter() - t
     pairs, history_info = None, None
-    if geo != "none" or transitions != "none" or config.radius_k:
+    if geo != "none" or transitions != "none" or config.radius_k or microcats != "none":
         pairs, history_info = benchmark_history(timings)
         history_info |= {
             "geo_history": geo,
             "transitions": transitions,
             "transition_alpha": alpha if transitions != "none" else None,
+            "microcats": microcats,
         }
     views = full_view(queries, pairs) if pairs is not None else None
     centers = query_centers(views, items) if views is not None and config.radius_k else None
@@ -164,6 +174,12 @@ def rank_with_model(
         t = time.perf_counter()
         frame = add_history_features(frame, views, items, geo, transitions, alpha)
         timings["history_features_s"] = time.perf_counter() - t
+    if microcats != "none":
+        index = microcat_index(config.dense_config, pairs, timings)
+        frame = microcat_features(
+            config.dense_config, index, frame, views, queries, corpus, "benchmark", timings
+        )
+        del index
     del pairs, views
     t = time.perf_counter()
     scores = model.predict(make_pool(frame, meta["features"]))

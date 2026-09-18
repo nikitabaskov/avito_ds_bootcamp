@@ -12,6 +12,8 @@ import torch
 from candgen.core import bm25, dense
 from candgen.core.data import ARTIFACTS_DIR
 from candgen.core.features import FEATURES, ItemTable, build_features, candidate_pool, list_features
+from candgen.core.history import HistoryView
+from candgen.core.microcats import MicrocatIndex, add_microcat_features
 from candgen.core.retrieval import Groups, Hits, radius_groups, rrf_fuse
 
 RUNS_DIR = ARTIFACTS_DIR / "runs"
@@ -147,6 +149,52 @@ def query_vectors(
     path.parent.mkdir(parents=True, exist_ok=True)
     np.savez(path, vectors=vectors, query_ids=np.array(query_ids))
     return vectors
+
+
+def text_vectors(
+    config: dense.DenseConfig, texts: list[str], path: Path, timings: dict
+) -> np.ndarray:
+    if path.exists():
+        data = np.load(path)
+        if data["texts"].tolist() == texts:
+            return data["vectors"]
+    t = time.perf_counter()
+    model = dense.load_model(config)
+    vectors = dense.encode(
+        model, dense.query_texts(pl.DataFrame({"query_text": texts}), False), config.batch_size
+    )
+    timings[f"{path.stem}_encode_s"] = time.perf_counter() - t
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(path, vectors=vectors, texts=np.array(texts))
+    return vectors
+
+
+def microcat_index(config: dense.DenseConfig, pairs: pl.DataFrame, timings: dict) -> MicrocatIndex:
+    texts = pairs["query_text"].unique().sort().to_list()
+    digest = hashlib.sha256("\n".join(texts).encode()).hexdigest()[:12]
+    vectors = text_vectors(config, texts, RUNS_DIR / "history" / f"texts_{digest}.npz", timings)
+    return MicrocatIndex(texts, vectors, dense.default_device())
+
+
+def microcat_features(
+    config: dense.DenseConfig,
+    index: MicrocatIndex | None,
+    frame: pl.DataFrame,
+    views: list[HistoryView],
+    queries: pl.DataFrame,
+    corpus: pl.DataFrame,
+    run_key: str,
+    timings: dict,
+) -> pl.DataFrame:
+    if index is None:
+        return frame
+    vectors = text_vectors(
+        config, queries["query_text"].to_list(), RUNS_DIR / run_key / "e5_texts.npz", timings
+    )
+    t = time.perf_counter()
+    frame = add_microcat_features(frame, views, index, vectors, corpus["item_microcat_id"])
+    timings[f"{run_key}_microcats_s"] = time.perf_counter() - t
+    return frame
 
 
 def load_corpus_embeddings(

@@ -28,12 +28,15 @@ from candgen.core.history import (
     query_centers,
 )
 from candgen.core.metrics import recall_at_k
+from candgen.core.microcats import MICROCAT_FEATURES, MICROCAT_MODES, MicrocatIndex
 from candgen.core.ranker import RankerConfig, make_pool, select_top, train_ranker
 from candgen.scripts.common import EXPERIMENTS_DIR, load_eval, peak_rss_gb
 from candgen.scripts.predict import git_state
 from candgen.scripts.runs import (
     RetrievalConfig,
     load_corpus_embeddings,
+    microcat_features,
+    microcat_index,
     pool_features,
     retrieve,
     rows_to_ids,
@@ -75,6 +78,7 @@ def train_model(
     items: ItemTable,
     item_vectors: torch.Tensor,
     scorer: FieldScorer,
+    index: MicrocatIndex | None,
     timings: dict,
 ) -> tuple[CatBoostRanker, dict]:
     train_queries = sample_eval_queries(train_contexts, args.train_queries, SEED)
@@ -101,10 +105,14 @@ def train_model(
     frame = scorer.add(frame, train_queries)
     timings["train_field_scores_s"] = time.perf_counter() - t
     t = time.perf_counter()
+    frame = add_history_features(
+        frame, views, items, args.geo_history, args.transitions, args.transition_alpha
+    )
+    frame = microcat_features(
+        retrieval.dense_config, index, frame, views, train_queries, corpus, train_key, timings
+    )
     frame = attach_labels(
-        add_history_features(
-            frame, views, items, args.geo_history, args.transitions, args.transition_alpha
-        ),
+        frame,
         train_queries["item_ids"].to_list(),
         corpus["item_id"].to_list(),
     )
@@ -224,6 +232,7 @@ def main() -> None:
     parser.add_argument("--transitions", choices=TRANSITION_MODES, default="none")
     parser.add_argument("--transition-alpha", type=float, default=10.0)
     parser.add_argument("--field-scores", choices=FIELD_MODES, default="none")
+    parser.add_argument("--microcats", choices=MICROCAT_MODES, default="none")
     parser.add_argument("--global-k", type=int, default=RetrievalConfig.global_k)
     parser.add_argument("--radius-km", type=float, default=RetrievalConfig.radius_km)
     parser.add_argument("--radius-k", type=int, default=RetrievalConfig.radius_k)
@@ -250,6 +259,7 @@ def main() -> None:
         *retrieval.features(),
         *FIELD_FEATURES[args.field_scores],
         *history_features(args.geo_history, args.transitions),
+        *MICROCAT_FEATURES[args.microcats],
     ]
     unknown = set(args.drop_features) - set(available)
     if unknown:
@@ -308,6 +318,9 @@ def main() -> None:
     t = time.perf_counter()
     scorer = FieldScorer(corpus, args.field_scores)
     timings["field_index_s"] = time.perf_counter() - t
+    index = (
+        microcat_index(retrieval.dense_config, pairs, timings) if args.microcats != "none" else None
+    )
     dev_frame = add_history_features(
         scorer.add(
             pool_features(retrieval, dev_runs, dev_queries, "dev", items, item_vectors, timings),
@@ -318,6 +331,9 @@ def main() -> None:
         args.geo_history,
         args.transitions,
         args.transition_alpha,
+    )
+    dev_frame = microcat_features(
+        retrieval.dense_config, index, dev_frame, dev_views, dev_queries, corpus, "dev", timings
     )
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -340,6 +356,7 @@ def main() -> None:
             items,
             item_vectors,
             scorer,
+            index,
             timings,
         )
         model_path = out_dir / "model.cbm"
@@ -352,11 +369,12 @@ def main() -> None:
             "train_queries": args.train_queries,
             "history": history_info,
             "field_scores": args.field_scores,
+            "microcats": args.microcats,
         }
         model_path.with_suffix(".json").write_text(
             json.dumps(model_meta, indent=2, ensure_ascii=False)
         )
-    del train_contexts, pairs, item_vectors
+    del train_contexts, pairs, item_vectors, index
 
     t = time.perf_counter()
     scores = model.predict(make_pool(dev_frame, features))
@@ -384,6 +402,7 @@ def main() -> None:
         "dropped_features": args.drop_features,
         "history": history_info,
         "field_scores": args.field_scores,
+        "microcats": args.microcats,
         "retrieval": dataclasses.asdict(retrieval),
         "ranker": dataclasses.asdict(ranker) if train_info else None,
         "model": {"path": str(model_path), **model_meta},
