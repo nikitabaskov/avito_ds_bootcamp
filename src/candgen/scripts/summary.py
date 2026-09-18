@@ -48,16 +48,26 @@ def comparison(name: str, reference: str) -> dict | None:
     )
 
 
+def trees(report: dict) -> int | None:
+    train = report.get("train") or {}
+    ranker = report.get("ranker") or report["model"].get("ranker") or {}
+    if "trees" in train:
+        return train["trees"]
+    if ranker.get("early_stopping_rounds") == 0:
+        return ranker["iterations"]
+    return train.get("best_iteration", report["model"].get("best_iteration"))
+
+
 def summarize(name: str, decisions: dict) -> dict:
     report = json.loads((EXPERIMENTS_DIR / name / "report.json").read_text())
-    train = report.get("train") or {}
     return {
         "experiment": name,
         "parent": report["parent"],
         "recall@50": report["recall@50"],
         "pool_recall": report["pool_recall"],
         "pool_size_mean": report["pool_size"]["mean"],
-        "trees": train.get("best_iteration", report["model"].get("best_iteration")),
+        "protocol": report["protocol"],
+        "trees": trees(report),
         "git": report["git"],
         "decision": decisions.get(name, ""),
         "vs_parent": comparison(name, report["parent"]),
@@ -74,16 +84,17 @@ def markdown(rows: list[dict]) -> str:
             "Разности — в процентных пунктах macro Recall@50 на 2 452 dev-запросах; "
             "CI95 — парный bootstrap по запросам, 5 000 повторов, seed 42. "
             "Жирным выделены разности, чей интервал не содержит ноль. "
-            "Вердикт — только статистика; решение учитывает ещё срезы, ресурсы и устойчивость обучения."
+            "Вердикт — только статистика; решение учитывает ещё срезы, ресурсы и устойчивость обучения. "
+            "Протокол v1 — ранняя остановка по внутренней проверке, v2 — фиксированные 500 деревьев."
         ),
         "",
         "## Итог по вариантам",
         "",
         (
             "| Эксперимент | Родитель | R@50 | К родителю, п.п. [CI95] | Вердикт | К B0, п.п. [CI95]"
-            " | Полнота пула | Полнота к родителю [CI95] | Деревьев | Решение |"
+            " | Полнота пула | Полнота к родителю [CI95] | Деревьев | Протокол | Решение |"
         ),
-        "| --- | --- | ---: | --- | --- | --- | ---: | --- | ---: | --- |",
+        "| --- | --- | ---: | --- | --- | --- | ---: | --- | ---: | --- | --- |",
     ]
     for row in rows:
         parent = row["vs_parent"]
@@ -92,7 +103,8 @@ def markdown(rows: list[dict]) -> str:
             + f" | {interval(parent)} | {VERDICTS[parent['verdict']] if parent else '—'}"
             + f" | {interval(row['vs_b0'])} | {row['pool_recall']:.4f}".replace(".", ",")
             + f" | {interval(parent['pool_recall'] if parent else None)}"
-            + f" | {row['trees'] if row['trees'] is not None else '—'} | {row['decision']} |"
+            + f" | {row['trees'] if row['trees'] is not None else '—'} | {row['protocol']}"
+            + f" | {row['decision']} |"
         )
     lines += [
         "",

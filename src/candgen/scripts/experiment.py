@@ -39,7 +39,8 @@ from candgen.scripts.runs import (
     rows_to_ids,
 )
 
-PROTOCOL = "v1"
+PROTOCOL = "v2"
+TREES = 500
 B0 = "EXP-000/b0"
 VALID_BASE_QUERIES = 6000
 VALID_SHARE = 0.1
@@ -131,6 +132,7 @@ def train_model(
         "fit_rows": fit_frame.height,
         "positive_rows": int(fit_frame["label"].sum()),
         "best_iteration": model.get_best_iteration(),
+        "trees": model.tree_count_,
         "best_valid": model.get_best_score().get("validation"),
     }
 
@@ -226,13 +228,11 @@ def main() -> None:
     parser.add_argument("--radius-km", type=float, default=RetrievalConfig.radius_km)
     parser.add_argument("--radius-k", type=int, default=RetrievalConfig.radius_k)
     parser.add_argument("--train-queries", type=int, default=VALID_BASE_QUERIES)
-    parser.add_argument("--iterations", type=int, default=RankerConfig.iterations)
+    parser.add_argument("--iterations", type=int, default=TREES)
     parser.add_argument("--learning-rate", type=float, default=RankerConfig.learning_rate)
     parser.add_argument("--depth", type=int, default=RankerConfig.depth)
     parser.add_argument("--seed", type=int, default=RankerConfig.random_seed)
-    parser.add_argument(
-        "--early-stopping-rounds", type=int, default=RankerConfig.early_stopping_rounds
-    )
+    parser.add_argument("--early-stopping-rounds", type=int, default=0)
     parser.add_argument("--task-type", choices=["CPU", "GPU"], default=RankerConfig.task_type)
     parser.add_argument("--examples", type=int, default=30)
     args = parser.parse_args()
@@ -265,6 +265,7 @@ def main() -> None:
     )
 
     started = time.perf_counter()
+    git = git_state()
     timings: dict[str, float] = {}
     corpus, dev_queries, seen_items = load_eval("dev")
     item_ids = corpus["item_id"].to_list()
@@ -378,7 +379,7 @@ def main() -> None:
         "experiment": name,
         "protocol": PROTOCOL,
         "parent": args.parent,
-        "git": git_state(),
+        "git": git,
         "features": features,
         "dropped_features": args.drop_features,
         "history": history_info,
