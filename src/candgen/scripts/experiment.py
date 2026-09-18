@@ -133,6 +133,7 @@ def train_model(
     frame = frame.join(with_positive, on="q", how="semi").sort("q", "rrf_rank")
     fit_frame = frame.filter(~pl.col("valid"))
     valid_frame = frame.filter(pl.col("valid"))
+    del frame
 
     t = time.perf_counter()
     model = train_ranker(fit_frame, valid_frame, ranker, features)
