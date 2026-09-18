@@ -113,3 +113,68 @@ def test_query_centers_prefer_corpus_then_history():
     assert centers[0].tolist() == [55.0, 37.0]
     assert centers[1].tolist() == [56.0, 37.0]
     assert np.isnan(centers[2]).all()
+
+
+def far_corpus() -> pl.DataFrame:
+    extra = corpus().head(1).with_columns(item_id=pl.lit("d"), item_latitude=pl.lit(58.0))
+    return pl.concat([corpus(), extra])
+
+
+def test_geo_damping_flags_unreliable_history_centers():
+    queries = contexts(["x", "y", "z", "u", "v"], [7, 100, 200, 300, 555], [[]] * 5)
+    history = contexts(
+        [f"h{i}" for i in range(13)],
+        [100] + [200] * 6 + [300] * 6,
+        [["a"]] + [["a"], ["a"], ["a"], ["d"], ["d"], ["d"]] + [["a"]] * 6,
+    )
+    views = full_view(queries, history_pairs(history, far_corpus()))
+    rows = pl.DataFrame(
+        {
+            "q": pl.Series([0, 0, 1, 2, 3, 4], dtype=pl.Int32),
+            "row": pl.Series([0, 2, 2, 2, 2, 2], dtype=pl.Int64),
+            "rrf_rank": [1.0, 2.0, 1.0, 1.0, 1.0, 1.0],
+            "dist_km": pl.Series([5.0, 5000.0, None, None, None, None], dtype=pl.Float32),
+            "location_items": [2.0, 2.0, 0.0, 0.0, 0.0, 0.0],
+        }
+    )
+    out = add_history_features(
+        rows, views, ItemTable(far_corpus()), "fallback", "none", 10.0, damping=True
+    )
+    assert out.columns[-2:] == ["geo_unreliable", "log_dist_clean"]
+    assert out["center_source"].to_list() == [0.0, 0.0, 1.0, 1.0, 1.0, 2.0]
+    assert out["geo_unreliable"].to_list() == [0.0, 0.0, 1.0, 1.0, 0.0, 0.0]
+    clean = out["log_dist_clean"].to_list()
+    assert clean[0] == pytest.approx(np.log1p(5.0))
+    assert clean[1] == pytest.approx(np.log1p(1000.0))
+    assert clean[2] == -1.0 and clean[3] == -1.0
+    assert clean[4] == pytest.approx(np.log1p(out["dist_km"][4]))
+    assert clean[5] is None
+    with pytest.raises(ValueError):
+        add_history_features(rows, views, ItemTable(far_corpus()), "none", "none", 10.0, True)
+
+
+def test_geo_damping_crossfit_ignores_own_fold_labels():
+    texts = [f"text {i}" for i in range(40)]
+    folds = text_fold(pl.Series(texts)).to_list()
+    target = next(i for i, f in enumerate(folds) if f == 0)
+    queries = contexts(texts, [100] * 40, [["a"]] * 40)
+    moved = contexts(texts, [100] * 40, [["d"] * 5 if f == 0 else ["a"] for f in folds])
+    holdout = pl.DataFrame({"q": pl.Series([], dtype=pl.Int32)})
+    rows = pl.DataFrame(
+        {
+            "q": pl.Series(range(40), dtype=pl.Int32),
+            "row": pl.Series([2] * 40, dtype=pl.Int64),
+            "rrf_rank": [1.0] * 40,
+            "dist_km": pl.Series([None] * 40, dtype=pl.Float32),
+            "location_items": [0.0] * 40,
+        }
+    )
+    items = ItemTable(far_corpus())
+
+    def damped(history: pl.DataFrame) -> pl.DataFrame:
+        views = crossfit_views(queries, history_pairs(history, far_corpus()), holdout)
+        return add_history_features(rows, views, items, "fallback", "none", 10.0, damping=True)
+
+    base, changed = damped(queries), damped(moved)
+    assert base.row(target) == changed.row(target)
+    assert not base.equals(changed)

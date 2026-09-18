@@ -107,7 +107,13 @@ def train_model(
     timings["train_field_scores_s"] = time.perf_counter() - t
     t = time.perf_counter()
     frame = add_history_features(
-        frame, views, items, args.geo_history, args.transitions, args.transition_alpha
+        frame,
+        views,
+        items,
+        args.geo_history,
+        args.transitions,
+        args.transition_alpha,
+        args.geo_damping,
     )
     frame = microcat_features(
         retrieval.dense_config, index, frame, views, train_queries, corpus, train_key, timings
@@ -246,6 +252,7 @@ def main() -> None:
     parser.add_argument("--geo-history", choices=GEO_MODES, default="none")
     parser.add_argument("--transitions", choices=TRANSITION_MODES, default="none")
     parser.add_argument("--transition-alpha", type=float, default=10.0)
+    parser.add_argument("--geo-damping", action="store_true")
     parser.add_argument("--field-scores", choices=FIELD_MODES, default="none")
     parser.add_argument("--microcats", choices=MICROCAT_MODES, default="none")
     parser.add_argument("--global-k", type=int, default=RetrievalConfig.global_k)
@@ -277,10 +284,12 @@ def main() -> None:
     )
     if retrieval.radius_k and retrieval.radius_km <= 0:
         parser.error("--radius-k needs a positive --radius-km")
+    if args.geo_damping and args.geo_history == "none":
+        parser.error("--geo-damping needs --geo-history")
     available = [
         *retrieval.features(),
         *FIELD_FEATURES[args.field_scores],
-        *history_features(args.geo_history, args.transitions),
+        *history_features(args.geo_history, args.transitions, args.geo_damping),
         *MICROCAT_FEATURES[args.microcats],
     ]
     unknown = set(args.drop_features) - set(available)
@@ -318,6 +327,7 @@ def main() -> None:
         "geo_history": args.geo_history,
         "transitions": args.transitions,
         "transition_alpha": args.transition_alpha if args.transitions != "none" else None,
+        "geo_damping": args.geo_damping,
         "dev_queries_with_center": int(dev_centers["hist_lat"].is_not_null().sum()),
     }
     del history
@@ -354,6 +364,7 @@ def main() -> None:
         args.geo_history,
         args.transitions,
         args.transition_alpha,
+        args.geo_damping,
     )
     dev_frame = microcat_features(
         retrieval.dense_config, index, dev_frame, dev_views, dev_queries, corpus, "dev", timings

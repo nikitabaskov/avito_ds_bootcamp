@@ -137,12 +137,13 @@ def rank_with_model(
     history = meta.get("history") or {}
     geo, transitions = history.get("geo_history", "none"), history.get("transitions", "none")
     alpha = history.get("transition_alpha") or 0.0
+    damping = history.get("geo_damping", False)
     fields = meta.get("field_scores", "none")
     microcats = meta.get("microcats", "none")
     expected = [
         *config.features(),
         *FIELD_FEATURES[fields],
-        *history_features(geo, transitions),
+        *history_features(geo, transitions, damping),
         *MICROCAT_FEATURES[microcats],
     ]
     if meta["features"] != expected:
@@ -159,6 +160,7 @@ def rank_with_model(
             "geo_history": geo,
             "transitions": transitions,
             "transition_alpha": alpha if transitions != "none" else None,
+            "geo_damping": damping,
             "microcats": microcats,
         }
     views = full_view(queries, pairs) if pairs is not None else None
@@ -172,7 +174,7 @@ def rank_with_model(
     timings["field_scores_s"] = time.perf_counter() - t
     if views is not None:
         t = time.perf_counter()
-        frame = add_history_features(frame, views, items, geo, transitions, alpha)
+        frame = add_history_features(frame, views, items, geo, transitions, alpha, damping)
         timings["history_features_s"] = time.perf_counter() - t
     if microcats != "none":
         index = microcat_index(config.dense_config, pairs, timings)

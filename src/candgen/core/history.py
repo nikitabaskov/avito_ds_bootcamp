@@ -18,14 +18,22 @@ TRANSITION_FEATURES = {
     "prob": TRANSITION_PROB,
     "full": [*TRANSITION_PROB, "trans_lift", "trans_targets", "trans_outside_share"],
 }
+DAMPING_FEATURES = ["geo_unreliable", "log_dist_clean"]
+UNRELIABLE_SPREAD_KM = 75.0
+UNRELIABLE_PAIRS = 5
+DIST_CLIP_KM = 1000.0
 CENTER_COLS = ["hist_lat", "hist_lon", "hist_pairs", "hist_items", "hist_spread_km"]
 SOURCE_COLS = ["trans_support", "trans_targets", "trans_outside_share"]
 
 type HistoryView = tuple[pl.DataFrame, pl.DataFrame]
 
 
-def history_features(geo: str, transitions: str) -> list[str]:
-    return [*GEO_FEATURES[geo], *TRANSITION_FEATURES[transitions]]
+def history_features(geo: str, transitions: str, damping: bool = False) -> list[str]:
+    return [
+        *GEO_FEATURES[geo],
+        *TRANSITION_FEATURES[transitions],
+        *(DAMPING_FEATURES if damping else []),
+    ]
 
 
 def text_fold(texts: pl.Series, folds: int = FOLDS) -> pl.Series:
@@ -151,6 +159,7 @@ def view_features(
     geo: str,
     transitions: str,
     alpha: float,
+    damping: bool = False,
 ) -> pl.DataFrame:
     queries, pairs = view
     joined = frame.join(queries, on="q").join(
@@ -175,6 +184,19 @@ def view_features(
         }
         if geo == "full":
             columns |= {"hist_dist_km": hist_dist, "hist_spread_km": pl.col("hist_spread_km")}
+        if damping:
+            joined = joined.with_columns(**columns)
+            unreliable = (pl.col("center_source") == 1.0) & (
+                (pl.col("hist_spread_km") > UNRELIABLE_SPREAD_KM)
+                | (pl.col("hist_pairs") < UNRELIABLE_PAIRS)
+            )
+            columns = {
+                "geo_unreliable": unreliable.cast(pl.Float32),
+                "log_dist_clean": pl.when(unreliable)
+                .then(-1.0)
+                .otherwise(pl.col("dist_km").clip(0.0, DIST_CLIP_KM).log1p())
+                .cast(pl.Float32),
+            }
     if transitions != "none":
         counts, sources = location_transitions(pairs, share)
         joined = (
@@ -204,7 +226,7 @@ def view_features(
                 "trans_outside_share": pl.col("trans_outside_share").cast(pl.Float32),
             }
     return joined.with_columns(**columns).select(
-        *frame.columns, *history_features(geo, transitions)
+        *frame.columns, *history_features(geo, transitions, damping)
     )
 
 
@@ -215,11 +237,14 @@ def add_history_features(
     geo: str,
     transitions: str,
     alpha: float,
+    damping: bool = False,
 ) -> pl.DataFrame:
+    if damping and geo == "none":
+        raise ValueError("geo damping needs geo history")
     if geo == "none" and transitions == "none":
         return frame
     share = corpus_location_share(items)
-    parts = [view_features(frame, v, items, share, geo, transitions, alpha) for v in views]
+    parts = [view_features(frame, v, items, share, geo, transitions, alpha, damping) for v in views]
     out = pl.concat(parts).sort("q", "rrf_rank")
     if out.height != frame.height:
         raise ValueError("history views must cover every query exactly once")
