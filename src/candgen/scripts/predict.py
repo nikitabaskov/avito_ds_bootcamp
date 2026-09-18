@@ -124,6 +124,78 @@ def model_config(meta: dict) -> RetrievalConfig:
     return config
 
 
+def feature_spec(meta: dict) -> dict:
+    history = meta.get("history") or {}
+    return {
+        "geo": history.get("geo_history", "none"),
+        "transitions": history.get("transitions", "none"),
+        "alpha": history.get("transition_alpha") or 0.0,
+        "damping": history.get("geo_damping", False),
+        "fields": meta.get("field_scores", "none"),
+        "microcats": meta.get("microcats", "none"),
+    }
+
+
+def expected_features(spec: dict, config: RetrievalConfig) -> list[str]:
+    return [
+        *config.features(),
+        *FIELD_FEATURES[spec["fields"]],
+        *history_features(spec["geo"], spec["transitions"], spec["damping"]),
+        *MICROCAT_FEATURES[spec["microcats"]],
+    ]
+
+
+def needs_history(spec: dict, config: RetrievalConfig) -> bool:
+    return (
+        spec["geo"] != "none"
+        or spec["transitions"] != "none"
+        or bool(config.radius_k)
+        or spec["microcats"] != "none"
+    )
+
+
+def feature_frame(
+    spec: dict,
+    config: RetrievalConfig,
+    corpus_name: str,
+    corpus: pl.DataFrame,
+    queries: pl.DataFrame,
+    run_key: str,
+    items: ItemTable,
+    pairs: pl.DataFrame | None,
+    timings: dict,
+    exact_prior: bool = False,
+) -> pl.DataFrame:
+    views = full_view(queries, pairs) if pairs is not None else None
+    centers = query_centers(views, items) if views is not None and config.radius_k else None
+    runs = retrieve(config, corpus_name, corpus, queries, run_key, timings, centers)
+    embeddings = load_corpus_embeddings(config.dense_config, corpus_name, corpus, timings)
+    item_vectors = torch.from_numpy(embeddings).to(default_device())
+    frame = pool_features(config, runs, queries, run_key, items, item_vectors, timings)
+    del item_vectors
+    t = time.perf_counter()
+    frame = FieldScorer(corpus, spec["fields"]).add(frame, queries)
+    timings["field_scores_s"] = time.perf_counter() - t
+    if views is not None:
+        t = time.perf_counter()
+        frame = add_history_features(
+            frame,
+            views,
+            items,
+            spec["geo"],
+            spec["transitions"],
+            spec["alpha"],
+            spec["damping"],
+        )
+        timings["history_features_s"] = time.perf_counter() - t
+    if spec["microcats"] != "none":
+        index = microcat_index(config.dense_config, pairs, timings, exact_prior)
+        frame = microcat_features(
+            config.dense_config, index, frame, views, queries, corpus, run_key, timings
+        )
+    return frame
+
+
 def rank_with_model(
     model_path: Path,
     meta: dict,
@@ -137,22 +209,11 @@ def rank_with_model(
 
     from candgen.core.ranker import make_pool, select_top
 
-    history = meta.get("history") or {}
-    geo, transitions = history.get("geo_history", "none"), history.get("transitions", "none")
-    alpha = history.get("transition_alpha") or 0.0
-    damping = history.get("geo_damping", False)
-    fields = meta.get("field_scores", "none")
-    microcats = meta.get("microcats", "none")
-    expected = [
-        *config.features(),
-        *FIELD_FEATURES[fields],
-        *history_features(geo, transitions, damping),
-        *MICROCAT_FEATURES[microcats],
-    ]
-    if meta["features"] != expected:
+    spec = feature_spec(meta)
+    if meta["features"] != expected_features(spec, config):
         raise SystemExit(f"{model_path} was trained with a different feature set")
-    exact_prior = microcats == "exact" or microcat_exact
-    if microcat_exact and microcats != "neighbors":
+    exact_prior = spec["microcats"] == "exact" or microcat_exact
+    if microcat_exact and spec["microcats"] != "neighbors":
         raise SystemExit("--microcat-exact applies only to models with neighbor microcats")
     model = CatBoostRanker()
     model.load_model(str(model_path))
@@ -160,36 +221,20 @@ def rank_with_model(
     items = ItemTable(corpus)
     timings["item_table_s"] = time.perf_counter() - t
     pairs, history_info = None, None
-    if geo != "none" or transitions != "none" or config.radius_k or microcats != "none":
+    if needs_history(spec, config):
         pairs, history_info = benchmark_history(timings)
         history_info |= {
-            "geo_history": geo,
-            "transitions": transitions,
-            "transition_alpha": alpha if transitions != "none" else None,
-            "geo_damping": damping,
-            "microcats": microcats,
+            "geo_history": spec["geo"],
+            "transitions": spec["transitions"],
+            "transition_alpha": spec["alpha"] if spec["transitions"] != "none" else None,
+            "geo_damping": spec["damping"],
+            "microcats": spec["microcats"],
             "microcat_exact_prior": exact_prior,
         }
-    views = full_view(queries, pairs) if pairs is not None else None
-    centers = query_centers(views, items) if views is not None and config.radius_k else None
-    runs = retrieve(config, "benchmark", corpus, queries, "benchmark", timings, centers)
-    embeddings = load_corpus_embeddings(config.dense_config, "benchmark", corpus, timings)
-    item_vectors = torch.from_numpy(embeddings).to(default_device())
-    frame = pool_features(config, runs, queries, "benchmark", items, item_vectors, timings)
-    t = time.perf_counter()
-    frame = FieldScorer(corpus, fields).add(frame, queries)
-    timings["field_scores_s"] = time.perf_counter() - t
-    if views is not None:
-        t = time.perf_counter()
-        frame = add_history_features(frame, views, items, geo, transitions, alpha, damping)
-        timings["history_features_s"] = time.perf_counter() - t
-    if microcats != "none":
-        index = microcat_index(config.dense_config, pairs, timings, exact_prior)
-        frame = microcat_features(
-            config.dense_config, index, frame, views, queries, corpus, "benchmark", timings
-        )
-        del index
-    del pairs, views
+    frame = feature_frame(
+        spec, config, "benchmark", corpus, queries, "benchmark", items, pairs, timings, exact_prior
+    )
+    del pairs
     t = time.perf_counter()
     scores = model.predict(make_pool(frame, meta["features"]))
     timings["predict_s"] = time.perf_counter() - t
