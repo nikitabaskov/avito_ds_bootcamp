@@ -8,7 +8,13 @@ from test_microcats import unit
 
 from candgen.core.history import full_view, history_pairs, query_locations
 from candgen.core.microcats import MicrocatIndex
-from candgen.core.signals import add_centroid_features, add_filter_features, parse_filters
+from candgen.core.signals import (
+    add_centroid_features,
+    add_filter_features,
+    parse_filters,
+    query_centroids,
+    region_hits,
+)
 
 ITEM_VECTORS = torch.from_numpy(unit([1, 0], [0, 1], [1, 1]))
 ROWS = {"a": 0, "b": 1, "c": 2}
@@ -19,9 +25,8 @@ def centroid_frame(views) -> pl.DataFrame:
         {"q": pl.Series([0, 0, 0], dtype=pl.Int32), "row": [0, 1, 2], "rrf_rank": [1, 2, 3]}
     )
     index = MicrocatIndex(["баня", "ремонт"], unit([0, 1], [1, 0]), "cpu")
-    return add_centroid_features(
-        frame, views, index, unit([1, 0.1]), ITEM_VECTORS, ROWS, ITEM_VECTORS
-    )
+    centroids = query_centroids(views, index, unit([1, 0.1]), ITEM_VECTORS, ROWS)
+    return add_centroid_features(frame, centroids, ITEM_VECTORS)
 
 
 def test_centroid_follows_items_chosen_by_similar_texts():
@@ -67,3 +72,24 @@ def test_filter_features_match_item_params_and_keep_missing():
     assert out["filt_vid"].to_list() == [1.0, 0.0, 0.0, None]
     assert out["filt_tip"].to_list() == [None] * 4
     assert out["filt_share"].to_list() == [1.0, 0.0, 0.0, None]
+
+
+def test_region_hits_search_core_cities_of_uncentered_queries():
+    pairs = history_pairs(
+        contexts(["ремонт"] * 9 + ["баня"], [100] * 10, [["a"]] * 9 + [["c"]]), corpus()
+    )
+    queries = pl.DataFrame({"query_text": ["x", "y"], "search_location_id": [100, 7]})
+    centroids = unit([1, 0], [1, 0])
+    targets = np.array([True, False])
+    rows, scores = region_hits(
+        centroids,
+        full_view(queries, pairs),
+        queries["search_location_id"].to_numpy(),
+        corpus()["item_location_id"].to_numpy(),
+        targets,
+        ITEM_VECTORS,
+        2,
+    )
+    assert rows[0].tolist() == [0, 1]
+    assert rows[1].tolist() == [-1, -1]
+    assert scores[0][0] == pytest.approx(1.0)

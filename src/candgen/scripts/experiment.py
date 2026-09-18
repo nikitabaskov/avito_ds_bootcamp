@@ -40,6 +40,7 @@ from candgen.scripts.runs import (
     microcat_features,
     microcat_index,
     pool_features,
+    region_runs,
     retrieve,
     rows_to_ids,
     signal_features,
@@ -102,6 +103,9 @@ def train_model(
         train_key,
         timings,
         query_centers(views, items) if retrieval.radius_k else None,
+    )
+    runs |= region_runs(
+        retrieval, index, views, train_queries, corpus, items, item_vectors, train_key, timings
     )
     frame = pool_features(retrieval, runs, train_queries, train_key, items, item_vectors, timings)
     t = time.perf_counter()
@@ -277,6 +281,7 @@ def main() -> None:
     parser.add_argument("--local-k", type=int, default=RetrievalConfig.local_k)
     parser.add_argument("--radius-km", type=float, default=RetrievalConfig.radius_km)
     parser.add_argument("--radius-k", type=int, default=RetrievalConfig.radius_k)
+    parser.add_argument("--region-k", type=int, default=RetrievalConfig.region_k)
     parser.add_argument("--e5-query-no-filters", action="store_true")
     parser.add_argument("--train-queries", type=int, default=VALID_BASE_QUERIES)
     parser.add_argument("--iterations", type=int, default=TREES)
@@ -300,14 +305,15 @@ def main() -> None:
         local_k=args.local_k,
         radius_km=args.radius_km,
         radius_k=args.radius_k,
+        region_k=args.region_k,
         dense_config=DenseConfig(query_filters=not args.e5_query_no_filters),
     )
     if retrieval.radius_k and retrieval.radius_km <= 0:
         parser.error("--radius-k needs a positive --radius-km")
     if args.geo_damping and args.geo_history == "none":
         parser.error("--geo-damping needs --geo-history")
-    if args.neighbor_centroid and args.microcats == "none":
-        parser.error("--neighbor-centroid needs --microcats")
+    if (args.neighbor_centroid or args.region_k) and args.microcats == "none":
+        parser.error("--neighbor-centroid and --region-k need --microcats")
     available = [
         *retrieval.features(),
         *FIELD_FEATURES[args.field_scores],
@@ -379,6 +385,9 @@ def main() -> None:
         microcat_index(retrieval.dense_config, pairs, timings, args.microcats == "exact")
         if args.microcats != "none"
         else None
+    )
+    dev_runs |= region_runs(
+        retrieval, index, dev_views, dev_queries, corpus, items, item_vectors, "dev", timings
     )
     dev_frame = add_history_features(
         scorer.add(

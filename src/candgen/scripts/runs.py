@@ -32,6 +32,7 @@ class RetrievalConfig:
     rrf_k: int = 60
     radius_km: float = 0.0
     radius_k: int = 0
+    region_k: int = 0
     bm25_config: bm25.BM25Config = field(
         default_factory=lambda: bm25.BM25Config(title_repeat=3, query_filters=True)
     )
@@ -43,15 +44,20 @@ class RetrievalConfig:
             names += [f"{c}_local" for c in self.channels]
         if self.radius_k:
             names += [f"{c}_radius" for c in self.channels]
+        if self.region_k:
+            names.append("dense_region")
         return names
 
     def list_depth(self, name: str) -> int:
         if name.endswith("_radius"):
             return self.radius_k
+        if name.endswith("_region"):
+            return self.region_k
         return self.global_k if name.endswith("_global") else self.local_k
 
     def features(self) -> list[str]:
-        return [*FEATURES, *list_features([n for n in self.list_names() if n.endswith("_radius")])]
+        extra = [n for n in self.list_names() if n.endswith(("_radius", "_region"))]
+        return [*FEATURES, *list_features(extra)]
 
     def report_name(self, part: str) -> str:
         name = [f"rrf_{part}", "+".join(self.channels), f"g{self.global_k}"]
@@ -59,6 +65,8 @@ class RetrievalConfig:
             name.append(f"l{self.local_k}")
         if self.radius_k:
             name.append(f"r{self.radius_km:g}x{self.radius_k}")
+        if self.region_k:
+            name.append(f"reg{self.region_k}")
         name.append(f"k{self.rrf_k}")
         if "bm25" in self.channels:
             name.append(f"bm25-{self.bm25_config.tag()}")
@@ -199,6 +207,68 @@ def microcat_features(
     return frame
 
 
+def neighbor_centroids(
+    config: dense.DenseConfig,
+    index: MicrocatIndex | None,
+    views: list[HistoryView] | None,
+    queries: pl.DataFrame,
+    run_key: str,
+    device: torch.device,
+    timings: dict,
+) -> np.ndarray:
+    if index is None or views is None:
+        raise ValueError("neighbor centroids need the microcat index and history views")
+    t = time.perf_counter()
+    history = load_corpus("split")
+    history_vectors = torch.from_numpy(
+        load_corpus_embeddings(config, "split", history, timings)
+    ).to(device)
+    vectors = text_vectors(
+        config, queries["query_text"].to_list(), RUNS_DIR / run_key / "e5_texts.npz", timings
+    )
+    centroids = signals.query_centroids(
+        views,
+        index,
+        vectors,
+        history_vectors,
+        {item: i for i, item in enumerate(history["item_id"].to_list())},
+    )
+    timings[f"{run_key}_centroids_s"] = time.perf_counter() - t
+    return centroids
+
+
+def region_runs(
+    config: RetrievalConfig,
+    index: MicrocatIndex | None,
+    views: list[HistoryView] | None,
+    queries: pl.DataFrame,
+    corpus: pl.DataFrame,
+    items: ItemTable,
+    item_vectors: torch.Tensor,
+    run_key: str,
+    timings: dict,
+) -> dict[str, Hits]:
+    if not config.region_k:
+        return {}
+    centroids = neighbor_centroids(
+        config.dense_config, index, views, queries, run_key, item_vectors.device, timings
+    )
+    t = time.perf_counter()
+    located = items.locations.filter(pl.col("location_items") > 0)["item_location_id"]
+    query_locations = queries["search_location_id"].to_numpy()
+    hits = signals.region_hits(
+        centroids,
+        views,
+        query_locations,
+        corpus["item_location_id"].to_numpy(),
+        ~np.isin(query_locations, located.to_numpy()),
+        item_vectors,
+        config.region_k,
+    )
+    timings[f"{run_key}_region_s"] = time.perf_counter() - t
+    return {"dense_region": hits}
+
+
 def signal_features(
     config: dense.DenseConfig,
     index: MicrocatIndex | None,
@@ -212,34 +282,19 @@ def signal_features(
     centroid: bool,
     filters: bool,
 ) -> pl.DataFrame:
-    t = time.perf_counter()
     if centroid:
-        if index is None or views is None:
-            raise ValueError("neighbor centroid needs the microcat index and history views")
-        history = load_corpus("split")
-        history_vectors = torch.from_numpy(
-            load_corpus_embeddings(config, "split", history, timings)
-        ).to(item_vectors.device)
-        vectors = text_vectors(
-            config, queries["query_text"].to_list(), RUNS_DIR / run_key / "e5_texts.npz", timings
+        centroids = neighbor_centroids(
+            config, index, views, queries, run_key, item_vectors.device, timings
         )
-        frame = signals.add_centroid_features(
-            frame,
-            views,
-            index,
-            vectors,
-            history_vectors,
-            {item: i for i, item in enumerate(history["item_id"].to_list())},
-            item_vectors,
-        )
-        del history_vectors
+        frame = signals.add_centroid_features(frame, centroids, item_vectors)
     if filters:
+        t = time.perf_counter()
         frame = signals.add_filter_features(
             frame,
             queries["search_infm_params_text"].to_list(),
             corpus["item_infm_params_text"].fill_null(""),
         )
-    timings[f"{run_key}_signals_s"] = time.perf_counter() - t
+        timings[f"{run_key}_filters_s"] = time.perf_counter() - t
     return frame
 
 

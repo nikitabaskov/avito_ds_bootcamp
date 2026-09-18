@@ -5,7 +5,7 @@ import polars as pl
 import torch
 
 from candgen.core.microcats import TEMPERATURE, MicrocatIndex
-from candgen.core.retrieval import Groups
+from candgen.core.retrieval import Groups, order_hits, search_groups
 
 FILTER_KEYS = (
     "Тип услуги автосервиса",
@@ -169,15 +169,13 @@ FILTER_FEATURES = ["filt_vid", "filt_tip", "filt_share"]
 PAIR_BLOCK = 1_000_000
 
 
-def add_centroid_features(
-    frame: pl.DataFrame,
+def query_centroids(
     views: list[tuple[pl.DataFrame, pl.DataFrame]],
     index: MicrocatIndex,
     query_vectors: np.ndarray,
     history_vectors: torch.Tensor,
     history_row: dict[str, int],
-    item_vectors: torch.Tensor,
-) -> pl.DataFrame:
+) -> np.ndarray:
     history = pl.concat([pairs.select("query_text", "item_id") for _, pairs in views]).unique()
     means = text_item_means(history, index.texts, history_row, history_vectors)
     centroids = np.zeros((len(query_vectors), means.shape[1]), dtype=np.float32)
@@ -185,6 +183,12 @@ def add_centroid_features(
         q = queries["q"].to_numpy()
         if q.size:
             centroids[q] = neighbor_centroids(index, means, pairs, query_vectors[q])
+    return centroids
+
+
+def add_centroid_features(
+    frame: pl.DataFrame, centroids: np.ndarray, item_vectors: torch.Tensor
+) -> pl.DataFrame:
     q_idx, rows = frame["q"].to_numpy(), frame["row"].to_numpy()
     device = item_vectors.device
     cent = torch.from_numpy(centroids).to(device)
@@ -197,6 +201,37 @@ def add_centroid_features(
     return frame.with_columns(nb_cos=pl.Series(nb_cos)).with_columns(
         nb_cos_rank=pl.col("nb_cos").rank("ordinal", descending=True).over("q").cast(pl.Float32)
     )
+
+
+def region_hits(
+    centroids: np.ndarray,
+    views: list[tuple[pl.DataFrame, pl.DataFrame]],
+    query_locations: np.ndarray,
+    item_locations: np.ndarray,
+    targets: np.ndarray,
+    item_vectors: torch.Tensor,
+    k: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    device = item_vectors.device
+    cent = torch.from_numpy(centroids).to(device)
+
+    def search(q: np.ndarray, items: np.ndarray, depth: int) -> tuple[np.ndarray, np.ndarray]:
+        matrix = item_vectors[torch.from_numpy(items).to(device)].float()
+        top_scores, top_rows = torch.topk(cent[torch.from_numpy(q).to(device)] @ matrix.T, depth)
+        return order_hits(items[top_rows.cpu().numpy()], top_scores.cpu().numpy())
+
+    rows = np.full((len(centroids), k), -1, dtype=np.int64)
+    scores = np.full((len(centroids), k), -np.inf, dtype=np.float32)
+    for queries, pairs in views:
+        in_view = np.zeros(len(centroids), dtype=bool)
+        in_view[queries["q"].to_numpy()] = True
+        mask = in_view & targets
+        if not mask.any():
+            continue
+        groups = region_core_groups(pairs, query_locations, item_locations, mask)
+        view_rows, view_scores = search_groups(search, groups, len(centroids), k)
+        rows[mask], scores[mask] = view_rows[mask], view_scores[mask]
+    return rows, scores
 
 
 def add_filter_features(frame: pl.DataFrame, filters: list[str], params: pl.Series) -> pl.DataFrame:

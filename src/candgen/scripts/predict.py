@@ -46,6 +46,7 @@ from candgen.scripts.runs import (
     microcat_features,
     microcat_index,
     pool_features,
+    region_runs,
     retrieve,
     rows_to_ids,
     signal_features,
@@ -114,13 +115,18 @@ def model_config(meta: dict) -> RetrievalConfig:
     saved = meta["retrieval"]
     query_filters = saved.get("dense_config", {}).get("query_filters", True)
     config = RetrievalConfig(
-        **{k: saved[k] for k in ("global_k", "local_k", "radius_km", "radius_k") if k in saved},
+        **{
+            k: saved[k]
+            for k in ("global_k", "local_k", "radius_km", "radius_k", "region_k")
+            if k in saved
+        },
         dense_config=DenseConfig(query_filters=query_filters),
     )
     current = json.loads(json.dumps(dataclasses.asdict(config)))
     if {k: current[k] for k in saved} != saved or set(current) - set(saved) - {
         "radius_km",
         "radius_k",
+        "region_k",
     }:
         raise SystemExit("model was trained with a different retrieval config")
     return config
@@ -177,6 +183,14 @@ def feature_frame(
     runs = retrieve(config, corpus_name, corpus, queries, run_key, timings, centers)
     embeddings = load_corpus_embeddings(config.dense_config, corpus_name, corpus, timings)
     item_vectors = torch.from_numpy(embeddings).to(default_device())
+    index = (
+        microcat_index(config.dense_config, pairs, timings, exact_prior)
+        if spec["microcats"] != "none"
+        else None
+    )
+    runs |= region_runs(
+        config, index, views, queries, corpus, items, item_vectors, run_key, timings
+    )
     frame = pool_features(config, runs, queries, run_key, items, item_vectors, timings)
     t = time.perf_counter()
     frame = FieldScorer(corpus, spec["fields"]).add(frame, queries)
@@ -193,9 +207,7 @@ def feature_frame(
             spec["damping"],
         )
         timings["history_features_s"] = time.perf_counter() - t
-    index = None
-    if spec["microcats"] != "none":
-        index = microcat_index(config.dense_config, pairs, timings, exact_prior)
+    if index is not None:
         frame = microcat_features(
             config.dense_config, index, frame, views, queries, corpus, run_key, timings
         )
