@@ -21,6 +21,7 @@ from candgen.core.data import (
 )
 from candgen.core.dense import default_device
 from candgen.core.features import ItemTable
+from candgen.core.fields import FIELD_FEATURES, FieldScorer
 from candgen.core.history import (
     add_history_features,
     full_view,
@@ -133,7 +134,9 @@ def rank_with_model(
     history = meta.get("history") or {}
     geo, transitions = history.get("geo_history", "none"), history.get("transitions", "none")
     alpha = history.get("transition_alpha") or 0.0
-    if meta["features"] != [*config.features(), *history_features(geo, transitions)]:
+    fields = meta.get("field_scores", "none")
+    expected = [*config.features(), *FIELD_FEATURES[fields], *history_features(geo, transitions)]
+    if meta["features"] != expected:
         raise SystemExit(f"{model_path} was trained with a different feature set")
     model = CatBoostRanker()
     model.load_model(str(model_path))
@@ -154,6 +157,9 @@ def rank_with_model(
     embeddings = load_corpus_embeddings(config.dense_config, "benchmark", corpus, timings)
     item_vectors = torch.from_numpy(embeddings).to(default_device())
     frame = pool_features(config, runs, queries, "benchmark", items, item_vectors, timings)
+    t = time.perf_counter()
+    frame = FieldScorer(corpus, fields).add(frame, queries)
+    timings["field_scores_s"] = time.perf_counter() - t
     if views is not None:
         t = time.perf_counter()
         frame = add_history_features(frame, views, items, geo, transitions, alpha)

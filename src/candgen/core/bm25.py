@@ -80,6 +80,19 @@ class BM25Retriever:
 
         return search_groups(search, groups, len(queries), k)
 
+    def pair_scores(self, queries: list[str], q: np.ndarray, rows: np.ndarray) -> np.ndarray:
+        empty = self.tokenizer.get_vocab_dict().get("")
+        tokens = [[t for t in ids if t != empty] for ids in self._tokenize(queries)]
+        out = np.zeros(len(q), dtype=np.float32)
+        bounds = np.flatnonzero(np.diff(q)) + 1
+        starts = np.concatenate([[0], bounds]).astype(np.int64)
+        ends = np.concatenate([bounds, [len(q)]]).astype(np.int64)
+        for start, end in zip(starts.tolist(), ends.tolist(), strict=True):
+            if start < end and tokens[q[start]]:
+                scores = self.model.get_scores_from_ids(tokens[q[start]])
+                out[start:end] = scores[rows[start:end]]
+        return out
+
     def _tokenize(self, queries: list[str]) -> list[list[int]]:
         return self.tokenizer.tokenize(queries, update_vocab=False, return_as="ids")
 

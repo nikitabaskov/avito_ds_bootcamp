@@ -14,6 +14,7 @@ from candgen.core.dense import default_device
 from candgen.core.diagnostics import error_map, positive_outcomes, query_outcomes
 from candgen.core.evaluation import paired_bootstrap, recall_report
 from candgen.core.features import ItemTable, attach_labels
+from candgen.core.fields import FIELD_FEATURES, FIELD_MODES, FieldScorer
 from candgen.core.history import (
     FOLDS,
     GEO_MODES,
@@ -70,6 +71,7 @@ def train_model(
     pairs: pl.DataFrame,
     items: ItemTable,
     item_vectors: torch.Tensor,
+    scorer: FieldScorer,
     timings: dict,
 ) -> tuple[CatBoostRanker, dict]:
     train_queries = sample_eval_queries(train_contexts, args.train_queries, SEED)
@@ -92,6 +94,9 @@ def train_model(
         query_centers(views, items) if retrieval.radius_k else None,
     )
     frame = pool_features(retrieval, runs, train_queries, train_key, items, item_vectors, timings)
+    t = time.perf_counter()
+    frame = scorer.add(frame, train_queries)
+    timings["train_field_scores_s"] = time.perf_counter() - t
     t = time.perf_counter()
     frame = attach_labels(
         add_history_features(
@@ -197,6 +202,7 @@ def main() -> None:
     parser.add_argument("--geo-history", choices=GEO_MODES, default="none")
     parser.add_argument("--transitions", choices=TRANSITION_MODES, default="none")
     parser.add_argument("--transition-alpha", type=float, default=10.0)
+    parser.add_argument("--field-scores", choices=FIELD_MODES, default="none")
     parser.add_argument("--global-k", type=int, default=RetrievalConfig.global_k)
     parser.add_argument("--radius-km", type=float, default=RetrievalConfig.radius_km)
     parser.add_argument("--radius-k", type=int, default=RetrievalConfig.radius_k)
@@ -218,7 +224,11 @@ def main() -> None:
     )
     if retrieval.radius_k and retrieval.radius_km <= 0:
         parser.error("--radius-k needs a positive --radius-km")
-    available = [*retrieval.features(), *history_features(args.geo_history, args.transitions)]
+    available = [
+        *retrieval.features(),
+        *FIELD_FEATURES[args.field_scores],
+        *history_features(args.geo_history, args.transitions),
+    ]
     unknown = set(args.drop_features) - set(available)
     if unknown:
         parser.error(f"unknown features: {sorted(unknown)}")
@@ -271,8 +281,14 @@ def main() -> None:
     item_vectors = torch.from_numpy(embeddings).to(default_device())
     del embeddings
     timings["item_table_s"] = time.perf_counter() - t
+    t = time.perf_counter()
+    scorer = FieldScorer(corpus, args.field_scores)
+    timings["field_index_s"] = time.perf_counter() - t
     dev_frame = add_history_features(
-        pool_features(retrieval, dev_runs, dev_queries, "dev", items, item_vectors, timings),
+        scorer.add(
+            pool_features(retrieval, dev_runs, dev_queries, "dev", items, item_vectors, timings),
+            dev_queries,
+        ),
         dev_views,
         items,
         args.geo_history,
@@ -299,6 +315,7 @@ def main() -> None:
             pairs,
             items,
             item_vectors,
+            scorer,
             timings,
         )
         model_path = out_dir / "model.cbm"
@@ -310,6 +327,7 @@ def main() -> None:
             "best_iteration": model.get_best_iteration(),
             "train_queries": args.train_queries,
             "history": history_info,
+            "field_scores": args.field_scores,
         }
         model_path.with_suffix(".json").write_text(
             json.dumps(model_meta, indent=2, ensure_ascii=False)
@@ -340,6 +358,7 @@ def main() -> None:
         "features": features,
         "dropped_features": args.drop_features,
         "history": history_info,
+        "field_scores": args.field_scores,
         "retrieval": dataclasses.asdict(retrieval),
         "ranker": dataclasses.asdict(ranker) if train_info else None,
         "model": {"path": str(model_path), **model_meta},
