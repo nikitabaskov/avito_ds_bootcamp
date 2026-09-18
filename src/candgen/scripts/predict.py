@@ -129,6 +129,7 @@ def rank_with_model(
     corpus: pl.DataFrame,
     queries: pl.DataFrame,
     timings: dict,
+    microcat_exact: bool = False,
 ) -> tuple[list[list[str]], dict]:
     from catboost import CatBoostRanker
 
@@ -148,6 +149,9 @@ def rank_with_model(
     ]
     if meta["features"] != expected:
         raise SystemExit(f"{model_path} was trained with a different feature set")
+    exact_prior = microcats == "exact" or microcat_exact
+    if microcat_exact and microcats != "neighbors":
+        raise SystemExit("--microcat-exact applies only to models with neighbor microcats")
     model = CatBoostRanker()
     model.load_model(str(model_path))
     t = time.perf_counter()
@@ -162,6 +166,7 @@ def rank_with_model(
             "transition_alpha": alpha if transitions != "none" else None,
             "geo_damping": damping,
             "microcats": microcats,
+            "microcat_exact_prior": exact_prior,
         }
     views = full_view(queries, pairs) if pairs is not None else None
     centers = query_centers(views, items) if views is not None and config.radius_k else None
@@ -177,7 +182,7 @@ def rank_with_model(
         frame = add_history_features(frame, views, items, geo, transitions, alpha, damping)
         timings["history_features_s"] = time.perf_counter() - t
     if microcats != "none":
-        index = microcat_index(config.dense_config, pairs, timings)
+        index = microcat_index(config.dense_config, pairs, timings, exact_prior)
         frame = microcat_features(
             config.dense_config, index, frame, views, queries, corpus, "benchmark", timings
         )
@@ -200,6 +205,7 @@ def main() -> None:
     parser.add_argument("--method", choices=["rrf", "catboost"], default="rrf")
     parser.add_argument("--model", type=Path, default=None)
     parser.add_argument("--tag", default=None)
+    parser.add_argument("--microcat-exact", action="store_true")
     args = parser.parse_args()
     if args.method == "catboost" and args.model is None:
         parser.error("--model is required for catboost")
@@ -223,7 +229,7 @@ def main() -> None:
         model_meta = None
     else:
         predictions, model_meta = rank_with_model(
-            args.model, meta, config, corpus, queries, timings
+            args.model, meta, config, corpus, queries, timings, args.microcat_exact
         )
         report_name = f"catboost_dev_{args.model.stem.removeprefix('ranker_')}"
     timings["total_s"] = time.perf_counter() - started

@@ -352,7 +352,9 @@ def main() -> None:
     scorer = FieldScorer(corpus, args.field_scores)
     timings["field_index_s"] = time.perf_counter() - t
     index = (
-        microcat_index(retrieval.dense_config, pairs, timings) if args.microcats != "none" else None
+        microcat_index(retrieval.dense_config, pairs, timings, args.microcats == "exact")
+        if args.microcats != "none"
+        else None
     )
     dev_frame = add_history_features(
         scorer.add(

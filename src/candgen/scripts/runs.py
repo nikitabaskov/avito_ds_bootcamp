@@ -169,11 +169,13 @@ def text_vectors(
     return vectors
 
 
-def microcat_index(config: dense.DenseConfig, pairs: pl.DataFrame, timings: dict) -> MicrocatIndex:
+def microcat_index(
+    config: dense.DenseConfig, pairs: pl.DataFrame, timings: dict, exact: bool = False
+) -> MicrocatIndex:
     texts = pairs["query_text"].unique().sort().to_list()
     digest = hashlib.sha256("\n".join(texts).encode()).hexdigest()[:12]
     vectors = text_vectors(config, texts, RUNS_DIR / "history" / f"texts_{digest}.npz", timings)
-    return MicrocatIndex(texts, vectors, dense.default_device())
+    return MicrocatIndex(texts, vectors, dense.default_device(), exact)
 
 
 def microcat_features(

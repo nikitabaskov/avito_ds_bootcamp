@@ -4,13 +4,17 @@ import torch
 
 from candgen.core.history import HistoryView
 
-MICROCAT_MODES = ("none", "neighbors")
+MICROCAT_MODES = ("none", "neighbors", "exact")
+NEIGHBOR_FEATURES = ["mc_prob", "mc_ratio", "mc_entropy", "mc_top_sim"]
 MICROCAT_FEATURES = {
     "none": [],
-    "neighbors": ["mc_prob", "mc_ratio", "mc_entropy", "mc_top_sim"],
+    "neighbors": NEIGHBOR_FEATURES,
+    "exact": [*NEIGHBOR_FEATURES, "mc_is_exact_match"],
 }
 NEIGHBORS = 40
 TEMPERATURE = 0.05
+EXACT_SIM = 0.999
+DUPLICATE_SIM = 0.998
 BLOCK_SIZE = 1024
 
 
@@ -24,9 +28,10 @@ def text_microcats(pairs: pl.DataFrame) -> pl.DataFrame:
 
 
 class MicrocatIndex:
-    def __init__(self, texts: list[str], vectors: np.ndarray, device: str):
+    def __init__(self, texts: list[str], vectors: np.ndarray, device: str, exact: bool = False):
         self.texts = pl.Series("query_text", texts)
         self.matrix = torch.from_numpy(vectors).to(device)
+        self.exact = exact
 
     def neighbors(self, vectors: np.ndarray, allowed: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         matrix = self.matrix[torch.from_numpy(allowed).to(self.matrix.device)]
@@ -53,17 +58,23 @@ class MicrocatIndex:
                     "mc_max": pl.Float64,
                     "mc_entropy": pl.Float64,
                     "mc_top_sim": pl.Float64,
+                    "mc_is_exact_match": pl.Float64,
                 }
             )
         rows, sims = self.neighbors(vectors[q], allowed)
         weights = np.exp((sims - sims[:, :1]) / TEMPERATURE)
+        exact = sims[:, 0] >= EXACT_SIM
+        if self.exact:
+            weights = np.where(
+                exact[:, None], (sims >= DUPLICATE_SIM).astype(weights.dtype), weights
+            )
         hits = pl.DataFrame(
             {
                 "q": np.repeat(q, rows.shape[1]).astype(np.int32),
                 "query_text": self.texts.gather(rows.ravel()),
                 "w": (weights / weights.sum(axis=1, keepdims=True)).ravel(),
             }
-        )
+        ).filter(pl.col("w") > 0)
         probs = (
             hits.join(shares, on="query_text")
             .group_by("q", "item_microcat_id")
@@ -73,7 +84,13 @@ class MicrocatIndex:
             mc_max=pl.col("mc_prob").max(),
             mc_entropy=-(pl.col("mc_prob") * pl.col("mc_prob").log()).sum(),
         )
-        top = pl.DataFrame({"q": q.astype(np.int32), "mc_top_sim": sims[:, 0].astype(np.float64)})
+        top = pl.DataFrame(
+            {
+                "q": q.astype(np.int32),
+                "mc_top_sim": sims[:, 0].astype(np.float64),
+                "mc_is_exact_match": exact.astype(np.float64),
+            }
+        )
         return probs.join(stats, on="q").join(top, on="q")
 
 
@@ -85,7 +102,9 @@ def add_microcat_features(
     item_microcats: pl.Series,
 ) -> pl.DataFrame:
     dist = pl.concat([index.distribution(view, vectors) for view in views])
-    per_query = dist.select("q", "mc_max", "mc_entropy", "mc_top_sim").unique("q")
+    per_query = dist.select("q", "mc_max", "mc_entropy", "mc_top_sim", "mc_is_exact_match").unique(
+        "q"
+    )
     return (
         frame.with_columns(item_microcat_id=item_microcats.gather(frame["row"]))
         .join(
@@ -99,7 +118,8 @@ def add_microcat_features(
             mc_ratio=(pl.col("mc_prob").fill_null(0.0) / pl.col("mc_max")).cast(pl.Float32),
             mc_entropy=pl.col("mc_entropy").cast(pl.Float32),
             mc_top_sim=pl.col("mc_top_sim").cast(pl.Float32),
+            mc_is_exact_match=pl.col("mc_is_exact_match").cast(pl.Float32),
         )
-        .select(*frame.columns, *MICROCAT_FEATURES["neighbors"])
+        .select(*frame.columns, *MICROCAT_FEATURES["exact" if index.exact else "neighbors"])
         .sort("q", "rrf_rank")
     )
