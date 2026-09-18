@@ -80,6 +80,24 @@ COMPARISON_SLICES = {
 }
 
 
+def average_seed_metrics(runs: list[pl.DataFrame]) -> pl.DataFrame:
+    """Average metrics per query across seeds, not predictions of an ensemble."""
+    if not runs:
+        raise ValueError("no seed runs")
+    ordered = [run.sort("query_id") for run in runs]
+    base = ordered[0]
+    context = [c for c in base.columns if c not in ("recall", "pool_recall")]
+    for run in ordered:
+        if run["query_id"].n_unique() != run.height:
+            raise ValueError("duplicate query_id in seed run")
+        if not base.select(context).equals(run.select(context)):
+            raise ValueError("seed runs have different queries or contexts")
+    return base.with_columns(
+        pl.Series(c, np.mean([run[c].to_numpy() for run in ordered], axis=0))
+        for c in ("recall", "pool_recall")
+    )
+
+
 def compare_per_query(per_query: pl.DataFrame, reference: pl.DataFrame) -> dict:
     joined = per_query.join(
         reference.select("query_id", ref_recall="recall", ref_pool="pool_recall"),

@@ -29,10 +29,11 @@ from candgen.core.history import (
 )
 from candgen.core.metrics import recall_at_k
 from candgen.core.microcats import MICROCAT_FEATURES, MICROCAT_MODES, MicrocatIndex
-from candgen.core.ranker import RankerConfig, make_pool, select_top, train_ranker
+from candgen.core.ranker import RankerConfig, full_recall_curve, make_pool, select_top, train_ranker
 from candgen.scripts.common import EXPERIMENTS_DIR, load_eval, peak_rss_gb
 from candgen.scripts.predict import git_state
 from candgen.scripts.runs import (
+    LOCAL_DEPTH,
     RetrievalConfig,
     load_corpus_embeddings,
     microcat_features,
@@ -118,18 +119,24 @@ def train_model(
     )
     timings["train_history_s"] = time.perf_counter() - t
     with_positive = frame.group_by("q").agg(pl.col("label").max() > 0).filter("label").select("q")
-    frame = (
-        frame.join(with_positive, on="q", how="semi")
-        .join(roles, on="q")
-        .filter(~pl.col("excluded"))
-        .sort("q", "rrf_rank")
+    frame = frame.join(roles, on="q").filter(~pl.col("excluded")).sort("q", "rrf_rank")
+    full_valid_frame = frame.filter("valid")
+    full_valid_queries = train_queries.with_row_index("q").join(
+        roles.filter("valid").select("q"), on="q", how="semi"
     )
+    frame = frame.join(with_positive, on="q", how="semi").sort("q", "rrf_rank")
     fit_frame = frame.filter(~pl.col("valid"))
     valid_frame = frame.filter(pl.col("valid"))
 
     t = time.perf_counter()
     model = train_ranker(fit_frame, valid_frame, ranker, features)
     timings["train_s"] = time.perf_counter() - t
+    t = time.perf_counter()
+    points = [n for n in TREE_POINTS if n < model.tree_count_] + [model.tree_count_]
+    full_valid = full_recall_curve(
+        model, full_valid_frame, full_valid_queries, corpus["item_id"].to_list(), features, points
+    )
+    timings["full_valid_s"] = time.perf_counter() - t
     return model, {
         "sampled_queries": train_queries.height,
         "queries_with_positive_in_pool": with_positive.height,
@@ -142,6 +149,14 @@ def train_model(
         "best_iteration": model.get_best_iteration(),
         "trees": model.tree_count_,
         "best_valid": model.get_best_score().get("validation"),
+        "validation": {
+            "queries": full_valid_queries.height,
+            "queries_with_positive_in_pool": valid_frame["q"].n_unique(),
+            "full_recall@50": full_valid,
+            "selection": (
+                "conditional_early_stopping" if ranker.early_stopping_rounds else "fixed_iterations"
+            ),
+        },
     }
 
 
@@ -234,10 +249,12 @@ def main() -> None:
     parser.add_argument("--field-scores", choices=FIELD_MODES, default="none")
     parser.add_argument("--microcats", choices=MICROCAT_MODES, default="none")
     parser.add_argument("--global-k", type=int, default=RetrievalConfig.global_k)
+    parser.add_argument("--local-k", type=int, default=RetrievalConfig.local_k)
     parser.add_argument("--radius-km", type=float, default=RetrievalConfig.radius_km)
     parser.add_argument("--radius-k", type=int, default=RetrievalConfig.radius_k)
     parser.add_argument("--train-queries", type=int, default=VALID_BASE_QUERIES)
     parser.add_argument("--iterations", type=int, default=TREES)
+    parser.add_argument("--loss-function", default=RankerConfig.loss_function)
     parser.add_argument("--learning-rate", type=float, default=RankerConfig.learning_rate)
     parser.add_argument("--depth", type=int, default=RankerConfig.depth)
     parser.add_argument("--seed", type=int, default=RankerConfig.random_seed)
@@ -245,13 +262,18 @@ def main() -> None:
     parser.add_argument("--task-type", choices=["CPU", "GPU"], default=RankerConfig.task_type)
     parser.add_argument("--examples", type=int, default=30)
     args = parser.parse_args()
+    if not 0 <= args.local_k <= LOCAL_DEPTH:
+        parser.error(f"--local-k must be between 0 and {LOCAL_DEPTH} (cached search depth)")
 
     name = f"{args.exp}/{args.variant}"
     out_dir = EXPERIMENTS_DIR / name
     if (out_dir / "report.json").exists():
         raise SystemExit(f"{out_dir} already has a report")
     retrieval = RetrievalConfig(
-        global_k=args.global_k, radius_km=args.radius_km, radius_k=args.radius_k
+        global_k=args.global_k,
+        local_k=args.local_k,
+        radius_km=args.radius_km,
+        radius_k=args.radius_k,
     )
     if retrieval.radius_k and retrieval.radius_km <= 0:
         parser.error("--radius-k needs a positive --radius-km")
@@ -266,6 +288,7 @@ def main() -> None:
         parser.error(f"unknown features: {sorted(unknown)}")
     features = [f for f in available if f not in args.drop_features]
     ranker = RankerConfig(
+        loss_function=args.loss_function,
         iterations=args.iterations,
         learning_rate=args.learning_rate,
         depth=args.depth,

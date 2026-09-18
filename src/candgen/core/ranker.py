@@ -6,6 +6,7 @@ import polars as pl
 from catboost import CatBoostRanker, Pool
 
 from candgen.core.features import FEATURES
+from candgen.core.metrics import recall_at_k
 
 
 @dataclass(frozen=True)
@@ -67,3 +68,27 @@ def select_top(
     for q, rows in top.iter_rows():
         out[q] = np.array(rows, dtype=np.int64)
     return out
+
+
+def full_recall_curve(
+    model: CatBoostRanker,
+    frame: pl.DataFrame,
+    queries: pl.DataFrame,
+    item_ids: Sequence[str],
+    features: Sequence[str],
+    points: Sequence[int],
+    k: int = 50,
+) -> dict[int, float]:
+    """Evaluate all held-out queries against their original positives, including pool misses.
+
+    queries.q keeps the original (possibly sparse) group IDs used by frame.
+    """
+    pool = make_pool(frame, features)
+    relevant = queries["item_ids"].to_list()
+    group_ids = queries["q"].to_list()
+    curve = {}
+    for n in points:
+        rows = select_top(frame, model.predict(pool, ntree_end=n), max(group_ids) + 1, k)
+        predicted = [[item_ids[r] for r in rows[q]] for q in group_ids]
+        curve[n] = float(recall_at_k(predicted, relevant, k).mean())
+    return curve
