@@ -1,3 +1,4 @@
+import numpy as np
 import polars as pl
 
 from candgen.core.data import SEED, stable_hash
@@ -91,6 +92,27 @@ def location_centers(pairs: pl.DataFrame) -> pl.DataFrame:
         )
     )
     return centers.join(spread, on="search_location_id").select("search_location_id", *CENTER_COLS)
+
+
+def query_centers(views: list[HistoryView], items: ItemTable) -> np.ndarray:
+    parts = [
+        queries.join(
+            items.locations.filter(pl.col("location_items") > 0),
+            left_on="search_location_id",
+            right_on="item_location_id",
+            how="left",
+        ).join(location_centers(pairs), on="search_location_id", how="left")
+        for queries, pairs in views
+    ]
+    return (
+        pl.concat(parts)
+        .sort("q")
+        .select(
+            lat=pl.coalesce("loc_lat", "hist_lat").fill_null(np.nan),
+            lon=pl.coalesce("loc_lon", "hist_lon").fill_null(np.nan),
+        )
+        .to_numpy()
+    )
 
 
 def corpus_location_share(items: ItemTable) -> pl.DataFrame:

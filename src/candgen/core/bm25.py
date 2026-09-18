@@ -8,7 +8,7 @@ import Stemmer
 from bm25s.tokenization import Tokenizer
 
 from candgen.core.data import normalize_text
-from candgen.core.retrieval import Hits, order_hits, search_local
+from candgen.core.retrieval import Groups, Hits, order_hits, search_groups, search_local
 
 
 @dataclass(frozen=True)
@@ -49,6 +49,7 @@ class BM25Retriever:
     def index(self, documents: list[str]) -> None:
         tokens = self.tokenizer.tokenize(documents, update_vocab=True, return_as="ids")
         self.model.index(tokens, show_progress=True)
+        self.size = len(documents)
 
     def search(self, queries: list[str], k: int) -> Hits:
         return self._retrieve(self._tokenize(queries), k)
@@ -68,6 +69,16 @@ class BM25Retriever:
             return self._retrieve([tokens[i] for i in query_rows], depth, mask)
 
         return search_local(search, query_locations, item_locations, k)
+
+    def search_groups(self, queries: list[str], groups: Groups, k: int) -> Hits:
+        tokens = self._tokenize(queries)
+
+        def search(query_rows: np.ndarray, item_rows: np.ndarray, depth: int) -> Hits:
+            mask = np.zeros(self.size, dtype=np.float32)
+            mask[item_rows] = 1.0
+            return self._retrieve([tokens[i] for i in query_rows], depth, mask)
+
+        return search_groups(search, groups, len(queries), k)
 
     def _tokenize(self, queries: list[str]) -> list[list[int]]:
         return self.tokenizer.tokenize(queries, update_vocab=False, return_as="ids")

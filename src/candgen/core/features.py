@@ -13,11 +13,12 @@ TOKEN_RE = re.compile(r"\w+")
 PARAMS_CHARS = 500
 EARTH_RADIUS_KM = 6371.0
 
-LIST_FEATURES = [
-    f"{kind}_{name}"
-    for name in ("bm25_global", "bm25_local", "dense_global", "dense_local")
-    for kind in ("rank", "score")
-]
+
+def list_features(names: Sequence[str]) -> list[str]:
+    return [f"{kind}_{name}" for name in names for kind in ("rank", "score")]
+
+
+LIST_FEATURES = list_features(("bm25_global", "bm25_local", "dense_global", "dense_local"))
 FEATURES = [
     *LIST_FEATURES,
     "rrf",
@@ -65,7 +66,9 @@ def candidate_pool(runs: dict[str, Hits], depths: dict[str, int], rrf_k: int) ->
         on="list", index=["q", "row"], values=["rank", "score"], aggregate_function="first"
     )
     pool = pool.with_columns(
-        pl.lit(None, dtype=pl.Float32).alias(c) for c in LIST_FEATURES if c not in pool.columns
+        pl.lit(None, dtype=pl.Float32).alias(c)
+        for c in dict.fromkeys([*LIST_FEATURES, *list_features(depths)])
+        if c not in pool.columns
     )
     ranks = [pl.col(f"rank_{name}") for name in depths]
     return (
@@ -189,6 +192,9 @@ def build_features(
         how="left",
     )
     query_stems = StemSets()(queries["query_text"].to_list())
+    extra_lists = [
+        c for c in pool.columns if c.startswith(("rank_", "score_")) and c not in FEATURES
+    ]
 
     frame = (
         pool.join(items.frame, on="row", how="left")
@@ -204,7 +210,7 @@ def build_features(
         cat_match=(pl.col("item_category_id") == pl.col("search_category")).cast(pl.Float32),
         dist_km=haversine_km(pl.col("lat"), pl.col("lon"), pl.col("loc_lat"), pl.col("loc_lon")),
         location_items=pl.col("location_items").fill_null(0.0),
-    ).select("q", "row", *FEATURES)
+    ).select("q", "row", *FEATURES, *extra_lists)
 
 
 def attach_labels(

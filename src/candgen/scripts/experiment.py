@@ -13,7 +13,7 @@ from candgen.core.data import SEED, SPLIT_DIR, sample_eval_queries, stable_hash
 from candgen.core.dense import default_device
 from candgen.core.diagnostics import error_map, positive_outcomes, query_outcomes
 from candgen.core.evaluation import paired_bootstrap, recall_report
-from candgen.core.features import FEATURES, ItemTable, attach_labels
+from candgen.core.features import ItemTable, attach_labels
 from candgen.core.history import (
     FOLDS,
     GEO_MODES,
@@ -24,6 +24,7 @@ from candgen.core.history import (
     history_features,
     history_pairs,
     location_centers,
+    query_centers,
 )
 from candgen.core.ranker import RankerConfig, make_pool, select_top, train_ranker
 from candgen.scripts.common import EXPERIMENTS_DIR, load_eval, peak_rss_gb
@@ -74,16 +75,24 @@ def train_model(
     train_queries = sample_eval_queries(train_contexts, args.train_queries, SEED)
     valid_texts = fixed_valid_texts(train_contexts)
     train_key = f"train{args.train_queries}"
-    runs = retrieve(retrieval, "split", corpus, train_queries, train_key, timings)
     roles = train_queries.select(
         q=pl.int_range(0, pl.len(), dtype=pl.Int32),
         valid=pl.col("query_text").is_in(valid_texts.implode()),
         excluded=valid_bucket(train_queries["query_text"])
         & ~pl.col("query_text").is_in(valid_texts.implode()),
     )
+    views = crossfit_views(train_queries, pairs, roles.filter("valid").select("q"))
+    runs = retrieve(
+        retrieval,
+        "split",
+        corpus,
+        train_queries,
+        train_key,
+        timings,
+        query_centers(views, items) if retrieval.radius_k else None,
+    )
     frame = pool_features(retrieval, runs, train_queries, train_key, items, item_vectors, timings)
     t = time.perf_counter()
-    views = crossfit_views(train_queries, pairs, roles.filter("valid").select("q"))
     frame = attach_labels(
         add_history_features(
             frame, views, items, args.geo_history, args.transitions, args.transition_alpha
@@ -188,6 +197,9 @@ def main() -> None:
     parser.add_argument("--geo-history", choices=GEO_MODES, default="none")
     parser.add_argument("--transitions", choices=TRANSITION_MODES, default="none")
     parser.add_argument("--transition-alpha", type=float, default=10.0)
+    parser.add_argument("--global-k", type=int, default=RetrievalConfig.global_k)
+    parser.add_argument("--radius-km", type=float, default=RetrievalConfig.radius_km)
+    parser.add_argument("--radius-k", type=int, default=RetrievalConfig.radius_k)
     parser.add_argument("--train-queries", type=int, default=VALID_BASE_QUERIES)
     parser.add_argument("--iterations", type=int, default=RankerConfig.iterations)
     parser.add_argument("--learning-rate", type=float, default=RankerConfig.learning_rate)
@@ -201,12 +213,16 @@ def main() -> None:
     out_dir = EXPERIMENTS_DIR / name
     if (out_dir / "report.json").exists():
         raise SystemExit(f"{out_dir} already has a report")
-    available = [*FEATURES, *history_features(args.geo_history, args.transitions)]
+    retrieval = RetrievalConfig(
+        global_k=args.global_k, radius_km=args.radius_km, radius_k=args.radius_k
+    )
+    if retrieval.radius_k and retrieval.radius_km <= 0:
+        parser.error("--radius-k needs a positive --radius-km")
+    available = [*retrieval.features(), *history_features(args.geo_history, args.transitions)]
     unknown = set(args.drop_features) - set(available)
     if unknown:
         parser.error(f"unknown features: {sorted(unknown)}")
     features = [f for f in available if f not in args.drop_features]
-    retrieval = RetrievalConfig()
     ranker = RankerConfig(
         iterations=args.iterations,
         learning_rate=args.learning_rate,
@@ -238,17 +254,26 @@ def main() -> None:
         "dev_queries_with_center": int(dev_centers["hist_lat"].is_not_null().sum()),
     }
     del history
-    dev_runs = retrieve(retrieval, "split", corpus, dev_queries, "dev", timings)
 
     t = time.perf_counter()
     items = ItemTable(corpus)
+    dev_views = full_view(dev_queries, pairs)
+    dev_runs = retrieve(
+        retrieval,
+        "split",
+        corpus,
+        dev_queries,
+        "dev",
+        timings,
+        query_centers(dev_views, items) if retrieval.radius_k else None,
+    )
     embeddings = load_corpus_embeddings(retrieval.dense_config, "split", corpus, timings)
     item_vectors = torch.from_numpy(embeddings).to(default_device())
     del embeddings
     timings["item_table_s"] = time.perf_counter() - t
     dev_frame = add_history_features(
         pool_features(retrieval, dev_runs, dev_queries, "dev", items, item_vectors, timings),
-        full_view(dev_queries, pairs),
+        dev_views,
         items,
         args.geo_history,
         args.transitions,

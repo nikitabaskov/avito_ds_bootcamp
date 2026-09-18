@@ -92,3 +92,25 @@ def test_build_features_pairs_query_and_item_signals():
 
     labelled = attach_labels(frame, [["b", "zzz"], []], corpus()["item_id"].to_list())
     assert dict(zip(labelled["row"], labelled["label"], strict=True)) == {0: 0, 1: 1, 2: 0}
+
+
+def test_radius_lists_add_their_own_columns():
+    runs = {name: hits([[0, 1]]) for name in ("bm25_global", "dense_global")}
+    runs["bm25_radius"] = hits([[2, -1]])
+    pool = candidate_pool(runs, dict.fromkeys(runs, 2), rrf_k=60)
+    assert pool["rank_bm25_radius"].to_list()[pool["row"].to_list().index(2)] == 1.0
+    assert pool["rank_bm25_local"].is_null().all()
+    queries = prepare_queries(
+        pl.DataFrame(
+            {
+                "search_query": ["баня"],
+                "search_location_id": [7],
+                "search_is_delivery_search": [0],
+                "search_infm_params_text": [""],
+                "search_category": [114],
+            }
+        )
+    )
+    vectors = torch.tensor([[1.0, 0.0], [0.0, 1.0], [0.6, 0.8]])
+    frame = build_features(pool, queries, ItemTable(corpus()), np.array([[1.0, 0.0]]), vectors)
+    assert frame.columns == ["q", "row", *FEATURES, "rank_bm25_radius", "score_bm25_radius"]

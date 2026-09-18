@@ -20,8 +20,14 @@ from candgen.core.data import (
     prepare_queries,
 )
 from candgen.core.dense import default_device
-from candgen.core.features import FEATURES, ItemTable
-from candgen.core.history import add_history_features, full_view, history_features, history_pairs
+from candgen.core.features import ItemTable
+from candgen.core.history import (
+    add_history_features,
+    full_view,
+    history_features,
+    history_pairs,
+    query_centers,
+)
 from candgen.core.submission import (
     ANSWER_K,
     answer_frame,
@@ -98,49 +104,61 @@ def benchmark_history(timings: dict) -> tuple[pl.DataFrame, dict]:
     }
 
 
+def model_config(meta: dict) -> RetrievalConfig:
+    saved = meta["retrieval"]
+    config = RetrievalConfig(
+        **{k: saved[k] for k in ("global_k", "local_k", "radius_km", "radius_k") if k in saved}
+    )
+    current = json.loads(json.dumps(dataclasses.asdict(config)))
+    if {k: current[k] for k in saved} != saved or set(current) - set(saved) - {
+        "radius_km",
+        "radius_k",
+    }:
+        raise SystemExit("model was trained with a different retrieval config")
+    return config
+
+
 def rank_with_model(
     model_path: Path,
+    meta: dict,
     config: RetrievalConfig,
     corpus: pl.DataFrame,
     queries: pl.DataFrame,
-    runs: dict,
     timings: dict,
 ) -> tuple[list[list[str]], dict]:
     from catboost import CatBoostRanker
 
     from candgen.core.ranker import make_pool, select_top
 
-    meta = json.loads(model_path.with_suffix(".json").read_text())
     history = meta.get("history") or {}
     geo, transitions = history.get("geo_history", "none"), history.get("transitions", "none")
     alpha = history.get("transition_alpha") or 0.0
-    expected = [*FEATURES, *history_features(geo, transitions)]
-    if meta["features"] != expected or meta["retrieval"] != json.loads(
-        json.dumps(dataclasses.asdict(config))
-    ):
-        raise SystemExit(f"{model_path} was trained with a different feature or retrieval config")
+    if meta["features"] != [*config.features(), *history_features(geo, transitions)]:
+        raise SystemExit(f"{model_path} was trained with a different feature set")
     model = CatBoostRanker()
     model.load_model(str(model_path))
-    embeddings = load_corpus_embeddings(config.dense_config, "benchmark", corpus, timings)
-    item_vectors = torch.from_numpy(embeddings).to(default_device())
     t = time.perf_counter()
     items = ItemTable(corpus)
     timings["item_table_s"] = time.perf_counter() - t
-    frame = pool_features(config, runs, queries, "benchmark", items, item_vectors, timings)
-    history_info = None
-    if geo != "none" or transitions != "none":
+    pairs, history_info = None, None
+    if geo != "none" or transitions != "none" or config.radius_k:
         pairs, history_info = benchmark_history(timings)
         history_info |= {
             "geo_history": geo,
             "transitions": transitions,
             "transition_alpha": alpha if transitions != "none" else None,
         }
+    views = full_view(queries, pairs) if pairs is not None else None
+    centers = query_centers(views, items) if views is not None and config.radius_k else None
+    runs = retrieve(config, "benchmark", corpus, queries, "benchmark", timings, centers)
+    embeddings = load_corpus_embeddings(config.dense_config, "benchmark", corpus, timings)
+    item_vectors = torch.from_numpy(embeddings).to(default_device())
+    frame = pool_features(config, runs, queries, "benchmark", items, item_vectors, timings)
+    if views is not None:
         t = time.perf_counter()
-        frame = add_history_features(
-            frame, full_view(queries, pairs), items, geo, transitions, alpha
-        )
+        frame = add_history_features(frame, views, items, geo, transitions, alpha)
         timings["history_features_s"] = time.perf_counter() - t
-        del pairs
+    del pairs, views
     t = time.perf_counter()
     scores = model.predict(make_pool(frame, meta["features"]))
     timings["predict_s"] = time.perf_counter() - t
@@ -162,6 +180,10 @@ def main() -> None:
     if args.method == "catboost" and args.model is None:
         parser.error("--model is required for catboost")
     config = RetrievalConfig()
+    meta: dict = {}
+    if args.method == "catboost":
+        meta = json.loads(args.model.with_suffix(".json").read_text())
+        config = model_config(meta)
 
     queries = prepare_queries(pl.read_parquet(QUERIES_PATH))
     corpus = load_corpus("benchmark")
@@ -170,14 +192,14 @@ def main() -> None:
 
     timings: dict[str, float] = {}
     started = time.perf_counter()
-    runs = retrieve(config, "benchmark", corpus, queries, "benchmark", timings)
     if args.method == "rrf":
+        runs = retrieve(config, "benchmark", corpus, queries, "benchmark", timings)
         predictions = rows_to_ids(item_ids, fuse(config, runs, timings))
         report_name = config.report_name("dev")
         model_meta = None
     else:
         predictions, model_meta = rank_with_model(
-            args.model, config, corpus, queries, runs, timings
+            args.model, meta, config, corpus, queries, timings
         )
         report_name = f"catboost_dev_{args.model.stem.removeprefix('ranker_')}"
     timings["total_s"] = time.perf_counter() - started

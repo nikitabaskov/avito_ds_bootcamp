@@ -10,6 +10,7 @@ from candgen.core.history import (
     full_view,
     history_pairs,
     location_centers,
+    query_centers,
     text_fold,
 )
 
@@ -103,3 +104,12 @@ def test_transitions_smooth_towards_corpus_share():
     assert by_q[2]["trans_unknown"] == 1.0 and by_q[2]["trans_prob"] == pytest.approx(1 / 3)
     assert by_q[2]["trans_lift"] == pytest.approx(np.log(2.0))
     assert out["dist_km"].to_list() == frame()["dist_km"].to_list()
+
+
+def test_query_centers_prefer_corpus_then_history():
+    queries = contexts(["x", "y", "z"], [7, 100, 555], [[], [], []])
+    views = full_view(queries, history_pairs(contexts(["h"], [100], [["c"]]), corpus()))
+    centers = query_centers(views, ItemTable(corpus()))
+    assert centers[0].tolist() == [55.0, 37.0]
+    assert centers[1].tolist() == [56.0, 37.0]
+    assert np.isnan(centers[2]).all()

@@ -10,7 +10,7 @@ import torch
 from sentence_transformers import SentenceTransformer
 
 from candgen.core.data import ARTIFACTS_DIR
-from candgen.core.retrieval import Hits, order_hits, search_local
+from candgen.core.retrieval import Groups, Hits, order_hits, search_groups, search_local
 
 EMBEDDINGS_DIR = ARTIFACTS_DIR / "embeddings"
 CHUNK_SIZE = 50_000
@@ -174,4 +174,9 @@ class DenseIndex:
             query_locations,
             item_locations,
             k,
+        )
+
+    def search_groups(self, queries: np.ndarray, groups: Groups, k: int) -> Hits:
+        return search_groups(
+            lambda q, items, depth: self.search(queries[q], depth, items), groups, len(queries), k
         )

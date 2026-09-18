@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from candgen.core.bm25 import BM25Config, BM25Retriever
-from candgen.core.retrieval import order_hits, rrf_fuse, search_local
+from candgen.core.retrieval import order_hits, radius_groups, rrf_fuse, search_groups, search_local
 
 
 def test_order_hits_breaks_ties_by_row():
@@ -53,3 +53,23 @@ def test_bm25_local_search_returns_only_same_location_matches():
         ["ремонт холодильника"], np.array([7]), np.array([1, 7, 7]), k=3
     )
     assert rows.tolist() == [[2, 1, -1]]
+
+
+def test_radius_groups_share_centers_and_skip_unknown():
+    centers = np.array([[55.0, 37.0], [np.nan, np.nan], [55.0, 37.0], [56.0, 37.0]])
+    items = np.array([[55.0, 37.0], [55.1, 37.0], [56.0, 37.0], [np.nan, np.nan]])
+    groups = radius_groups(centers, items, radius_km=20.0)
+    assert sorted((q.tolist(), i.tolist()) for q, i in groups) == [
+        ([0, 2], [0, 1]),
+        ([3], [2]),
+    ]
+
+
+def test_search_groups_pads_queries_outside_groups():
+    groups = [(np.array([2]), np.array([4, 5])), (np.array([0]), np.array([], dtype=np.int64))]
+
+    def search(queries, items, depth):
+        return np.tile(items[:depth], (len(queries), 1)), np.ones((len(queries), depth))
+
+    rows, _ = search_groups(search, groups, n_queries=3, k=3)
+    assert rows.tolist() == [[-1, -1, -1], [-1, -1, -1], [4, 5, -1]]

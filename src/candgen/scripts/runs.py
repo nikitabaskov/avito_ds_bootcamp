@@ -1,4 +1,5 @@
 import functools
+import hashlib
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -10,12 +11,13 @@ import torch
 
 from candgen.core import bm25, dense
 from candgen.core.data import ARTIFACTS_DIR
-from candgen.core.features import ItemTable, build_features, candidate_pool
-from candgen.core.retrieval import Hits, rrf_fuse
+from candgen.core.features import FEATURES, ItemTable, build_features, candidate_pool, list_features
+from candgen.core.retrieval import Groups, Hits, radius_groups, rrf_fuse
 
 RUNS_DIR = ARTIFACTS_DIR / "runs"
 GLOBAL_DEPTH = 1000
 LOCAL_DEPTH = 500
+RADIUS_DEPTH = 100
 CHANNELS = ("bm25", "dense")
 
 
@@ -26,6 +28,8 @@ class RetrievalConfig:
     global_k: int = 300
     local_k: int = 200
     rrf_k: int = 60
+    radius_km: float = 0.0
+    radius_k: int = 0
     bm25_config: bm25.BM25Config = field(
         default_factory=lambda: bm25.BM25Config(title_repeat=3, query_filters=True)
     )
@@ -35,15 +39,24 @@ class RetrievalConfig:
         names = [f"{c}_global" for c in self.channels]
         if self.local:
             names += [f"{c}_local" for c in self.channels]
+        if self.radius_k:
+            names += [f"{c}_radius" for c in self.channels]
         return names
 
     def list_depth(self, name: str) -> int:
+        if name.endswith("_radius"):
+            return self.radius_k
         return self.global_k if name.endswith("_global") else self.local_k
+
+    def features(self) -> list[str]:
+        return [*FEATURES, *list_features([n for n in self.list_names() if n.endswith("_radius")])]
 
     def report_name(self, part: str) -> str:
         name = [f"rrf_{part}", "+".join(self.channels), f"g{self.global_k}"]
         if self.local:
             name.append(f"l{self.local_k}")
+        if self.radius_k:
+            name.append(f"r{self.radius_km:g}x{self.radius_k}")
         name.append(f"k{self.rrf_k}")
         if "bm25" in self.channels:
             name.append(f"bm25-{self.bm25_config.tag()}")
@@ -74,6 +87,7 @@ def bm25_runs(
     queries: pl.DataFrame,
     run_dir: Path,
     timings: dict,
+    radius: tuple[str, Groups] | None = None,
 ) -> dict[str, Hits]:
     @functools.cache
     def retriever() -> bm25.BM25Retriever:
@@ -87,7 +101,7 @@ def bm25_runs(
     locations = queries["search_location_id"].to_numpy(), corpus["item_location_id"].to_numpy()
     base = f"bm25_{config.tag()}"
     query_ids = queries["query_id"].to_list()
-    return {
+    runs = {
         "bm25_global": cached_run(
             run_dir / f"{base}_global.npz",
             query_ids,
@@ -101,6 +115,15 @@ def bm25_runs(
             timings,
         ),
     }
+    if radius:
+        tag, groups = radius
+        runs["bm25_radius"] = cached_run(
+            run_dir / f"{base}_{tag}.npz",
+            query_ids,
+            lambda: retriever().search_groups(texts, groups, RADIUS_DEPTH),
+            timings,
+        )
+    return runs
 
 
 def query_vectors(
@@ -144,6 +167,7 @@ def dense_runs(
     queries: pl.DataFrame,
     run_dir: Path,
     timings: dict,
+    radius: tuple[str, Groups] | None = None,
 ) -> dict[str, Hits]:
     @functools.cache
     def encoded() -> tuple[dense.DenseIndex, np.ndarray]:
@@ -166,12 +190,23 @@ def dense_runs(
     filters = "_qf" if config.query_filters else ""
     base = f"dense_{config.passage_tag()}{filters}"
     query_ids = queries["query_id"].to_list()
-    return {
+    runs = {
         "dense_global": cached_run(run_dir / f"{base}_global.npz", query_ids, search, timings),
         "dense_local": cached_run(
             run_dir / f"{base}_local{LOCAL_DEPTH}.npz", query_ids, search_local, timings
         ),
     }
+    if radius:
+        tag, groups = radius
+
+        def search_radius() -> Hits:
+            index, vectors = encoded()
+            return index.search_groups(vectors, groups, RADIUS_DEPTH)
+
+        runs["dense_radius"] = cached_run(
+            run_dir / f"{base}_{tag}.npz", query_ids, search_radius, timings
+        )
+    return runs
 
 
 def retrieve(
@@ -181,13 +216,32 @@ def retrieve(
     queries: pl.DataFrame,
     run_key: str,
     timings: dict,
+    centers: np.ndarray | None = None,
 ) -> dict[str, Hits]:
     run_dir = RUNS_DIR / run_key
+    radius = None
+    if config.radius_k:
+        if centers is None or len(centers) != queries.height:
+            raise ValueError("radius lists need one center per query")
+        if config.radius_k > RADIUS_DEPTH:
+            raise ValueError(f"radius_k is capped by cached depth {RADIUS_DEPTH}")
+        t = time.perf_counter()
+        coords = corpus.select(
+            pl.col("item_latitude", "item_longitude").cast(pl.Float64).fill_null(np.nan)
+        ).to_numpy()
+        digest = hashlib.sha256(np.ascontiguousarray(centers, dtype=np.float64).tobytes())
+        radius = (
+            f"radius{config.radius_km:g}_{RADIUS_DEPTH}_c{digest.hexdigest()[:12]}",
+            radius_groups(centers, coords, config.radius_km),
+        )
+        timings["radius_groups_s"] = time.perf_counter() - t
     runs: dict[str, Hits] = {}
     if "bm25" in config.channels:
-        runs |= bm25_runs(config.bm25_config, corpus, queries, run_dir, timings)
+        runs |= bm25_runs(config.bm25_config, corpus, queries, run_dir, timings, radius)
     if "dense" in config.channels:
-        runs |= dense_runs(config.dense_config, corpus_name, corpus, queries, run_dir, timings)
+        runs |= dense_runs(
+            config.dense_config, corpus_name, corpus, queries, run_dir, timings, radius
+        )
     return runs
 
 
