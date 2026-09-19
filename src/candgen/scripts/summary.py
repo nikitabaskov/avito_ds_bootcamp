@@ -36,6 +36,7 @@ def runs() -> list[str]:
     return sorted(
         str(path.parent.relative_to(EXPERIMENTS_DIR))
         for path in EXPERIMENTS_DIR.glob("EXP-*/*/report.json")
+        if (path.parent / "per_query.parquet").exists()
     )
 
 
