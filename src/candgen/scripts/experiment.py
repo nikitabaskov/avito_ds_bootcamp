@@ -10,7 +10,7 @@ import torch
 from catboost import CatBoostRanker
 
 from candgen.core.data import SEED, SPLIT_DIR, sample_eval_queries, stable_hash
-from candgen.core.dense import DenseConfig, default_device
+from candgen.core.dense import DenseConfig, config_for, default_device
 from candgen.core.diagnostics import error_map, positive_outcomes, query_outcomes
 from candgen.core.evaluation import compare_per_query, recall_report
 from candgen.core.features import ItemTable, attach_labels
@@ -30,7 +30,7 @@ from candgen.core.history import (
 from candgen.core.metrics import recall_at_k
 from candgen.core.microcats import MICROCAT_FEATURES, MICROCAT_MODES, MicrocatIndex
 from candgen.core.ranker import RankerConfig, full_recall_curve, make_pool, select_top, train_ranker
-from candgen.core.signals import CENTROID_FEATURES, FILTER_FEATURES
+from candgen.core.signals import CENTROID_FEATURES, ENCODER_FEATURES, FILTER_FEATURES
 from candgen.scripts.common import EXPERIMENTS_DIR, load_eval, peak_rss_gb
 from candgen.scripts.predict import git_state
 from candgen.scripts.runs import (
@@ -134,6 +134,7 @@ def train_frames(
         timings,
         args.neighbor_centroid,
         args.filter_match,
+        args.second_encoder,
     )
     frame = attach_labels(
         frame,
@@ -301,6 +302,8 @@ def build_parser(required: bool = True) -> argparse.ArgumentParser:
     parser.add_argument("--geo-weight", type=float, default=RetrievalConfig.geo_weight)
     parser.add_argument("--geo-delta", type=float, default=RetrievalConfig.geo_delta)
     parser.add_argument("--e5-query-no-filters", action="store_true")
+    parser.add_argument("--dense-model", default=DenseConfig.model)
+    parser.add_argument("--second-encoder", default=None)
     parser.add_argument("--train-queries", type=int, default=VALID_BASE_QUERIES)
     parser.add_argument("--iterations", type=int, default=TREES)
     parser.add_argument("--loss-function", default=RankerConfig.loss_function)
@@ -328,7 +331,7 @@ def configure(
         geo_k=args.geo_k,
         geo_weight=args.geo_weight,
         geo_delta=args.geo_delta,
-        dense_config=DenseConfig(query_filters=not args.e5_query_no_filters),
+        dense_config=config_for(args.dense_model, query_filters=not args.e5_query_no_filters),
     )
     if retrieval.radius_k and retrieval.radius_km <= 0:
         parser.error("--radius-k needs a positive --radius-km")
@@ -345,6 +348,7 @@ def configure(
         *MICROCAT_FEATURES[args.microcats],
         *(CENTROID_FEATURES if args.neighbor_centroid else []),
         *(FILTER_FEATURES if args.filter_match else []),
+        *(ENCODER_FEATURES if args.second_encoder else []),
     ]
     unknown = set(args.drop_features) - set(available)
     if unknown:
@@ -440,8 +444,13 @@ def prepare(args: argparse.Namespace, retrieval: RetrievalConfig, timings: dict)
         timings,
         args.neighbor_centroid,
         args.filter_match,
+        args.second_encoder,
     )
-    signal_info = {"centroid": args.neighbor_centroid, "filters": args.filter_match}
+    signal_info = {
+        "centroid": args.neighbor_centroid,
+        "filters": args.filter_match,
+        "encoder": args.second_encoder,
+    }
     return {
         "corpus": corpus,
         "dev_queries": dev_queries,

@@ -175,6 +175,8 @@ def query_vectors(
 def text_vectors(
     config: dense.DenseConfig, texts: list[str], path: Path, timings: dict
 ) -> np.ndarray:
+    if config.model != dense.DenseConfig.model:
+        path = path.with_stem(f"{path.stem}_{config.passage_tag()}")
     if path.exists():
         data = np.load(path)
         if data["texts"].tolist() == texts:
@@ -294,7 +296,25 @@ def signal_features(
     timings: dict,
     centroid: bool,
     filters: bool,
+    encoder: str | None = None,
+    corpus_name: str = "split",
 ) -> pl.DataFrame:
+    if encoder:
+        t = time.perf_counter()
+        second = dense.config_for(
+            encoder, params_chars=config.params_chars, query_filters=config.query_filters
+        )
+        second_items = torch.from_numpy(
+            load_corpus_embeddings(second, corpus_name, corpus, timings)
+        ).to(item_vectors.device)
+        frame = signals.add_cosine_features(
+            frame,
+            tuple(signals.ENCODER_FEATURES),
+            query_vectors(second, queries, RUNS_DIR / run_key, timings),
+            second_items,
+        )
+        del second_items
+        timings[f"{run_key}_encoder_s"] = time.perf_counter() - t
     if centroid:
         centroids = neighbor_centroids(
             config, index, views, queries, run_key, item_vectors.device, timings

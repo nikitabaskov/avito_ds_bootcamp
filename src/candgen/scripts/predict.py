@@ -19,7 +19,7 @@ from candgen.core.data import (
     load_train,
     prepare_queries,
 )
-from candgen.core.dense import DenseConfig, default_device
+from candgen.core.dense import DenseConfig, config_for, default_device
 from candgen.core.features import ItemTable
 from candgen.core.fields import FIELD_FEATURES, FieldScorer
 from candgen.core.history import (
@@ -30,7 +30,7 @@ from candgen.core.history import (
     query_centers,
 )
 from candgen.core.microcats import MICROCAT_FEATURES
-from candgen.core.signals import CENTROID_FEATURES, FILTER_FEATURES
+from candgen.core.signals import CENTROID_FEATURES, ENCODER_FEATURES, FILTER_FEATURES
 from candgen.core.submission import (
     ANSWER_K,
     answer_frame,
@@ -116,14 +116,17 @@ GEO_KEYS = ("geo_km", "geo_k", "geo_weight", "geo_delta")
 
 def model_config(meta: dict) -> RetrievalConfig:
     saved = meta["retrieval"]
-    query_filters = saved.get("dense_config", {}).get("query_filters", True)
+    saved_dense = saved.get("dense_config", {})
+    query_filters = saved_dense.get("query_filters", True)
     config = RetrievalConfig(
         **{
             k: saved[k]
             for k in ("global_k", "local_k", "radius_km", "radius_k", "region_k", *GEO_KEYS)
             if k in saved
         },
-        dense_config=DenseConfig(query_filters=query_filters),
+        dense_config=config_for(
+            saved_dense.get("model", DenseConfig.model), query_filters=query_filters
+        ),
     )
     current = json.loads(json.dumps(dataclasses.asdict(config)))
     if {k: current[k] for k in saved} != saved or set(current) - set(saved) - {
@@ -147,6 +150,7 @@ def feature_spec(meta: dict) -> dict:
         "microcats": meta.get("microcats", "none"),
         "centroid": (meta.get("signals") or {}).get("centroid", False),
         "filters": (meta.get("signals") or {}).get("filters", False),
+        "encoder": (meta.get("signals") or {}).get("encoder"),
     }
 
 
@@ -158,6 +162,7 @@ def expected_features(spec: dict, config: RetrievalConfig) -> list[str]:
         *MICROCAT_FEATURES[spec["microcats"]],
         *(CENTROID_FEATURES if spec["centroid"] else []),
         *(FILTER_FEATURES if spec["filters"] else []),
+        *(ENCODER_FEATURES if spec["encoder"] else []),
     ]
 
 
@@ -232,6 +237,8 @@ def feature_frame(
         timings,
         spec["centroid"],
         spec["filters"],
+        spec["encoder"],
+        corpus_name,
     )
 
 

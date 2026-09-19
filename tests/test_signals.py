@@ -9,7 +9,9 @@ from test_microcats import unit
 from candgen.core.history import full_view, history_pairs, query_locations
 from candgen.core.microcats import MicrocatIndex
 from candgen.core.signals import (
+    ENCODER_FEATURES,
     add_centroid_features,
+    add_cosine_features,
     add_filter_features,
     parse_filters,
     query_centroids,
@@ -93,3 +95,10 @@ def test_region_hits_search_core_cities_of_uncentered_queries():
     assert rows[0].tolist() == [0, 1]
     assert rows[1].tolist() == [-1, -1]
     assert scores[0][0] == pytest.approx(1.0)
+
+
+def test_cosine_features_rank_items_within_each_query():
+    frame = pl.DataFrame({"q": pl.Series([0, 0, 1, 1], dtype=pl.Int32), "row": [0, 1, 0, 2]})
+    out = add_cosine_features(frame, tuple(ENCODER_FEATURES), unit([0, 1], [1, 0]), ITEM_VECTORS)
+    assert out["enc2_sim"].to_list() == pytest.approx([0.0, 1.0, 1.0, 2**-0.5])
+    assert out["enc2_rank"].to_list() == [2.0, 1.0, 1.0, 2.0]

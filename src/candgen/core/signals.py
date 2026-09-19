@@ -165,6 +165,7 @@ def region_core_groups(
 
 
 CENTROID_FEATURES = ["nb_cos", "nb_cos_rank"]
+ENCODER_FEATURES = ["enc2_sim", "enc2_rank"]
 FILTER_FEATURES = ["filt_vid", "filt_tip", "filt_share"]
 PAIR_BLOCK = 1_000_000
 
@@ -186,21 +187,39 @@ def query_centroids(
     return centroids
 
 
-def add_centroid_features(
-    frame: pl.DataFrame, centroids: np.ndarray, item_vectors: torch.Tensor
-) -> pl.DataFrame:
+def pair_cosine(
+    frame: pl.DataFrame, query_vectors: np.ndarray, item_vectors: torch.Tensor
+) -> np.ndarray:
     q_idx, rows = frame["q"].to_numpy(), frame["row"].to_numpy()
     device = item_vectors.device
-    cent = torch.from_numpy(centroids).to(device)
-    nb_cos = np.empty(len(q_idx), dtype=np.float32)
+    queries = torch.from_numpy(query_vectors).to(device)
+    out = np.empty(len(q_idx), dtype=np.float32)
     for start in range(0, len(q_idx), PAIR_BLOCK):
         block = slice(start, start + PAIR_BLOCK)
         a = item_vectors[torch.from_numpy(rows[block].copy()).to(device)].float()
-        b = cent[torch.from_numpy(q_idx[block].copy()).to(device)]
-        nb_cos[block] = (a * b).sum(dim=1).cpu().numpy()
-    return frame.with_columns(nb_cos=pl.Series(nb_cos)).with_columns(
-        nb_cos_rank=pl.col("nb_cos").rank("ordinal", descending=True).over("q").cast(pl.Float32)
+        b = queries[torch.from_numpy(q_idx[block].copy()).to(device)].float()
+        out[block] = (a * b).sum(dim=1).cpu().numpy()
+    return out
+
+
+def add_cosine_features(
+    frame: pl.DataFrame,
+    names: tuple[str, str],
+    query_vectors: np.ndarray,
+    item_vectors: torch.Tensor,
+) -> pl.DataFrame:
+    sim, rank = names
+    return frame.with_columns(
+        pl.Series(sim, pair_cosine(frame, query_vectors, item_vectors))
+    ).with_columns(
+        pl.col(sim).rank("ordinal", descending=True).over("q").cast(pl.Float32).alias(rank)
     )
+
+
+def add_centroid_features(
+    frame: pl.DataFrame, centroids: np.ndarray, item_vectors: torch.Tensor
+) -> pl.DataFrame:
+    return add_cosine_features(frame, tuple(CENTROID_FEATURES), centroids, item_vectors)
 
 
 def region_hits(
