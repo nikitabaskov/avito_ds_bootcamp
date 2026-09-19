@@ -25,6 +25,18 @@ def search_groups(search: GroupSearch, groups: Groups, n_queries: int, k: int) -
     return rows, scores
 
 
+def geo_rerank(
+    hits: Hits,
+    query_locations: np.ndarray,
+    item_locations: np.ndarray,
+    weight: float,
+    delta: float,
+) -> Hits:
+    rows, scores = hits
+    other = (rows >= 0) & (item_locations[np.maximum(rows, 0)] != query_locations[:, None])
+    return order_hits(rows, np.where(other, scores * weight - delta, scores).astype(np.float32))
+
+
 def location_groups(query_locations: np.ndarray, item_locations: np.ndarray) -> Groups:
     return [
         (np.flatnonzero(query_locations == location), np.flatnonzero(item_locations == location))

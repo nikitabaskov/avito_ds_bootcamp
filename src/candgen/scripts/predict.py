@@ -111,13 +111,16 @@ def benchmark_history(timings: dict) -> tuple[pl.DataFrame, dict]:
     }
 
 
+GEO_KEYS = ("geo_km", "geo_k", "geo_weight", "geo_delta")
+
+
 def model_config(meta: dict) -> RetrievalConfig:
     saved = meta["retrieval"]
     query_filters = saved.get("dense_config", {}).get("query_filters", True)
     config = RetrievalConfig(
         **{
             k: saved[k]
-            for k in ("global_k", "local_k", "radius_km", "radius_k", "region_k")
+            for k in ("global_k", "local_k", "radius_km", "radius_k", "region_k", *GEO_KEYS)
             if k in saved
         },
         dense_config=DenseConfig(query_filters=query_filters),
@@ -127,6 +130,7 @@ def model_config(meta: dict) -> RetrievalConfig:
         "radius_km",
         "radius_k",
         "region_k",
+        *GEO_KEYS,
     }:
         raise SystemExit("model was trained with a different retrieval config")
     return config
@@ -162,6 +166,7 @@ def needs_history(spec: dict, config: RetrievalConfig) -> bool:
         spec["geo"] != "none"
         or spec["transitions"] != "none"
         or bool(config.radius_k)
+        or bool(config.geo_k)
         or spec["microcats"] != "none"
     )
 
@@ -179,7 +184,11 @@ def feature_frame(
     exact_prior: bool = False,
 ) -> pl.DataFrame:
     views = full_view(queries, pairs) if pairs is not None else None
-    centers = query_centers(views, items) if views is not None and config.radius_k else None
+    centers = (
+        query_centers(views, items)
+        if views is not None and (config.radius_k or config.geo_k)
+        else None
+    )
     runs = retrieve(config, corpus_name, corpus, queries, run_key, timings, centers)
     embeddings = load_corpus_embeddings(config.dense_config, corpus_name, corpus, timings)
     item_vectors = torch.from_numpy(embeddings).to(default_device())

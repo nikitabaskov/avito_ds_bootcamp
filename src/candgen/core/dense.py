@@ -7,7 +7,8 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 import torch
-from sentence_transformers import SentenceTransformer
+from huggingface_hub import snapshot_download
+from sentence_transformers import SentenceTransformer, models
 
 from candgen.core.data import ARTIFACTS_DIR
 from candgen.core.retrieval import Groups, Hits, order_hits, search_groups, search_local
@@ -18,6 +19,7 @@ REVISIONS = {
     "intfloat/multilingual-e5-base": "d128750597153bb5987e10b1c3493a34e5a4502a",
     "deepvk/USER-base": "e8446472f6024df155a04b2f0911b6044cabc51f",
 }
+EXPLICIT_MODULES = {"deepvk/USER-base"}
 
 
 @dataclass(frozen=True)
@@ -69,7 +71,13 @@ def query_texts(queries: pl.DataFrame, with_filters: bool) -> list[str]:
 
 def load_model(config: DenseConfig, device: str | None = None) -> SentenceTransformer:
     device = device or default_device()
-    model = SentenceTransformer(config.model, revision=config.revision, device=device)
+    if config.model in EXPLICIT_MODULES:
+        path = snapshot_download(config.model, revision=config.revision)
+        body = models.Transformer(path, max_seq_length=config.max_seq_length)
+        pooling = models.Pooling(body.get_embedding_dimension(), "mean")
+        model = SentenceTransformer(modules=[body, pooling, models.Normalize()], device=device)
+    else:
+        model = SentenceTransformer(config.model, revision=config.revision, device=device)
     if model.max_seq_length != config.max_seq_length:
         model.max_seq_length = config.max_seq_length
     if device == "cuda":

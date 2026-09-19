@@ -2,7 +2,14 @@ import numpy as np
 import pytest
 
 from candgen.core.bm25 import BM25Config, BM25Retriever
-from candgen.core.retrieval import order_hits, radius_groups, rrf_fuse, search_groups, search_local
+from candgen.core.retrieval import (
+    geo_rerank,
+    order_hits,
+    radius_groups,
+    rrf_fuse,
+    search_groups,
+    search_local,
+)
 
 
 def test_order_hits_breaks_ties_by_row():
@@ -73,3 +80,14 @@ def test_search_groups_pads_queries_outside_groups():
 
     rows, _ = search_groups(search, groups, n_queries=3, k=3)
     assert rows.tolist() == [[-1, -1, -1], [-1, -1, -1], [4, 5, -1]]
+
+
+def test_geo_rerank_penalizes_other_locations_only():
+    rows = np.array([[0, 1, 2, -1]])
+    scores = np.array([[10.0, 9.0, 8.0, -np.inf]], dtype=np.float32)
+    item_locations = np.array([7, 5, 5])
+    ordered, adjusted = geo_rerank((rows, scores), np.array([5]), item_locations, 0.6, 0.0)
+    assert ordered.tolist() == [[1, 2, 0, -1]]
+    assert adjusted[0, 2] == pytest.approx(6.0)
+    ordered, _ = geo_rerank((rows, scores), np.array([5]), item_locations, 1.0, 1.5)
+    assert ordered.tolist() == [[1, 0, 2, -1]]

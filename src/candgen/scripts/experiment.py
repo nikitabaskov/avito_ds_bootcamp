@@ -100,7 +100,7 @@ def train_frames(
         train_queries,
         train_key,
         timings,
-        query_centers(views, items) if retrieval.radius_k else None,
+        query_centers(views, items) if retrieval.radius_k or retrieval.geo_k else None,
     )
     runs |= region_runs(
         retrieval, index, views, train_queries, corpus, items, item_vectors, train_key, timings
@@ -296,6 +296,10 @@ def build_parser(required: bool = True) -> argparse.ArgumentParser:
     parser.add_argument("--radius-km", type=float, default=RetrievalConfig.radius_km)
     parser.add_argument("--radius-k", type=int, default=RetrievalConfig.radius_k)
     parser.add_argument("--region-k", type=int, default=RetrievalConfig.region_k)
+    parser.add_argument("--geo-km", type=float, default=RetrievalConfig.geo_km)
+    parser.add_argument("--geo-k", type=int, default=RetrievalConfig.geo_k)
+    parser.add_argument("--geo-weight", type=float, default=RetrievalConfig.geo_weight)
+    parser.add_argument("--geo-delta", type=float, default=RetrievalConfig.geo_delta)
     parser.add_argument("--e5-query-no-filters", action="store_true")
     parser.add_argument("--train-queries", type=int, default=VALID_BASE_QUERIES)
     parser.add_argument("--iterations", type=int, default=TREES)
@@ -320,10 +324,16 @@ def configure(
         radius_km=args.radius_km,
         radius_k=args.radius_k,
         region_k=args.region_k,
+        geo_km=args.geo_km,
+        geo_k=args.geo_k,
+        geo_weight=args.geo_weight,
+        geo_delta=args.geo_delta,
         dense_config=DenseConfig(query_filters=not args.e5_query_no_filters),
     )
     if retrieval.radius_k and retrieval.radius_km <= 0:
         parser.error("--radius-k needs a positive --radius-km")
+    if retrieval.geo_k and retrieval.geo_km <= 0:
+        parser.error("--geo-k needs a positive --geo-km")
     if args.geo_damping and args.geo_history == "none":
         parser.error("--geo-damping needs --geo-history")
     if (args.neighbor_centroid or args.region_k) and args.microcats == "none":
@@ -386,7 +396,7 @@ def prepare(args: argparse.Namespace, retrieval: RetrievalConfig, timings: dict)
         dev_queries,
         "dev",
         timings,
-        query_centers(dev_views, items) if retrieval.radius_k else None,
+        query_centers(dev_views, items) if retrieval.radius_k or retrieval.geo_k else None,
     )
     embeddings = load_corpus_embeddings(retrieval.dense_config, "split", corpus, timings)
     item_vectors = torch.from_numpy(embeddings).to(default_device())

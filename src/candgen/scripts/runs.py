@@ -14,12 +14,13 @@ from candgen.core.data import ARTIFACTS_DIR, load_corpus
 from candgen.core.features import FEATURES, ItemTable, build_features, candidate_pool, list_features
 from candgen.core.history import HistoryView
 from candgen.core.microcats import MicrocatIndex, add_microcat_features
-from candgen.core.retrieval import Groups, Hits, radius_groups, rrf_fuse
+from candgen.core.retrieval import Groups, Hits, geo_rerank, radius_groups, rrf_fuse
 
 RUNS_DIR = ARTIFACTS_DIR / "runs"
 GLOBAL_DEPTH = 1000
 LOCAL_DEPTH = 500
 RADIUS_DEPTH = 100
+GEO_DEPTH = 1000
 CHANNELS = ("bm25", "dense")
 
 
@@ -33,6 +34,10 @@ class RetrievalConfig:
     radius_km: float = 0.0
     radius_k: int = 0
     region_k: int = 0
+    geo_km: float = 0.0
+    geo_k: int = 0
+    geo_weight: float = 1.0
+    geo_delta: float = 0.0
     bm25_config: bm25.BM25Config = field(
         default_factory=lambda: bm25.BM25Config(title_repeat=3, query_filters=True)
     )
@@ -44,6 +49,8 @@ class RetrievalConfig:
             names += [f"{c}_local" for c in self.channels]
         if self.radius_k:
             names += [f"{c}_radius" for c in self.channels]
+        if self.geo_k:
+            names += [f"{c}_geo" for c in self.channels]
         if self.region_k:
             names.append("dense_region")
         return names
@@ -53,10 +60,12 @@ class RetrievalConfig:
             return self.radius_k
         if name.endswith("_region"):
             return self.region_k
+        if name.endswith("_geo"):
+            return self.geo_k
         return self.global_k if name.endswith("_global") else self.local_k
 
     def features(self) -> list[str]:
-        extra = [n for n in self.list_names() if n.endswith(("_radius", "_region"))]
+        extra = [n for n in self.list_names() if n.endswith(("_radius", "_geo", "_region"))]
         return [*FEATURES, *list_features(extra)]
 
     def report_name(self, part: str) -> str:
@@ -65,6 +74,8 @@ class RetrievalConfig:
             name.append(f"l{self.local_k}")
         if self.radius_k:
             name.append(f"r{self.radius_km:g}x{self.radius_k}")
+        if self.geo_k:
+            name.append(f"geo{self.geo_km:g}x{self.geo_k}w{self.geo_weight:g}d{self.geo_delta:g}")
         if self.region_k:
             name.append(f"reg{self.region_k}")
         name.append(f"k{self.rrf_k}")
@@ -98,6 +109,7 @@ def bm25_runs(
     run_dir: Path,
     timings: dict,
     radius: tuple[str, Groups] | None = None,
+    geo: tuple[str, Groups] | None = None,
 ) -> dict[str, Hits]:
     @functools.cache
     def retriever() -> bm25.BM25Retriever:
@@ -125,14 +137,15 @@ def bm25_runs(
             timings,
         ),
     }
-    if radius:
-        tag, groups = radius
-        runs["bm25_radius"] = cached_run(
-            run_dir / f"{base}_{tag}.npz",
-            query_ids,
-            lambda: retriever().search_groups(texts, groups, RADIUS_DEPTH),
-            timings,
-        )
+    for name, spec, depth in (("radius", radius, RADIUS_DEPTH), ("georaw", geo, GEO_DEPTH)):
+        if spec:
+            tag, groups = spec
+            runs[f"bm25_{name}"] = cached_run(
+                run_dir / f"{base}_{tag}.npz",
+                query_ids,
+                lambda groups=groups, depth=depth: retriever().search_groups(texts, groups, depth),
+                timings,
+            )
     return runs
 
 
@@ -348,6 +361,7 @@ def dense_runs(
     run_dir: Path,
     timings: dict,
     radius: tuple[str, Groups] | None = None,
+    geo: tuple[str, Groups] | None = None,
 ) -> dict[str, Hits]:
     @functools.cache
     def encoded() -> tuple[dense.DenseIndex, np.ndarray]:
@@ -376,16 +390,17 @@ def dense_runs(
             run_dir / f"{base}_local{LOCAL_DEPTH}.npz", query_ids, search_local, timings
         ),
     }
-    if radius:
-        tag, groups = radius
+    for name, spec, depth in (("radius", radius, RADIUS_DEPTH), ("georaw", geo, GEO_DEPTH)):
+        if spec:
+            tag, groups = spec
 
-        def search_radius() -> Hits:
-            index, vectors = encoded()
-            return index.search_groups(vectors, groups, RADIUS_DEPTH)
+            def search_groups(groups: Groups = groups, depth: int = depth) -> Hits:
+                index, vectors = encoded()
+                return index.search_groups(vectors, groups, depth)
 
-        runs["dense_radius"] = cached_run(
-            run_dir / f"{base}_{tag}.npz", query_ids, search_radius, timings
-        )
+            runs[f"dense_{name}"] = cached_run(
+                run_dir / f"{base}_{tag}.npz", query_ids, search_groups, timings
+            )
     return runs
 
 
@@ -399,29 +414,46 @@ def retrieve(
     centers: np.ndarray | None = None,
 ) -> dict[str, Hits]:
     run_dir = RUNS_DIR / run_key
-    radius = None
-    if config.radius_k:
+    radius = geo = None
+    if config.radius_k or config.geo_k:
         if centers is None or len(centers) != queries.height:
-            raise ValueError("radius lists need one center per query")
-        if config.radius_k > RADIUS_DEPTH:
-            raise ValueError(f"radius_k is capped by cached depth {RADIUS_DEPTH}")
+            raise ValueError("radius and geo lists need one center per query")
+        if config.radius_k > RADIUS_DEPTH or config.geo_k > GEO_DEPTH:
+            raise ValueError("radius_k and geo_k are capped by cached depth")
         t = time.perf_counter()
         coords = corpus.select(
             pl.col("item_latitude", "item_longitude").cast(pl.Float64).fill_null(np.nan)
         ).to_numpy()
         digest = hashlib.sha256(np.ascontiguousarray(centers, dtype=np.float64).tobytes())
-        radius = (
-            f"radius{config.radius_km:g}_{RADIUS_DEPTH}_c{digest.hexdigest()[:12]}",
-            radius_groups(centers, coords, config.radius_km),
-        )
+        suffix = f"c{digest.hexdigest()[:12]}"
+        if config.radius_k:
+            radius = (
+                f"radius{config.radius_km:g}_{RADIUS_DEPTH}_{suffix}",
+                radius_groups(centers, coords, config.radius_km),
+            )
+        if config.geo_k:
+            geo = (
+                f"radius{config.geo_km:g}_{GEO_DEPTH}_{suffix}",
+                radius_groups(centers, coords, config.geo_km),
+            )
         timings["radius_groups_s"] = time.perf_counter() - t
     runs: dict[str, Hits] = {}
     if "bm25" in config.channels:
-        runs |= bm25_runs(config.bm25_config, corpus, queries, run_dir, timings, radius)
+        runs |= bm25_runs(config.bm25_config, corpus, queries, run_dir, timings, radius, geo)
     if "dense" in config.channels:
         runs |= dense_runs(
-            config.dense_config, corpus_name, corpus, queries, run_dir, timings, radius
+            config.dense_config, corpus_name, corpus, queries, run_dir, timings, radius, geo
         )
+    if geo:
+        locations = queries["search_location_id"].to_numpy(), corpus["item_location_id"].to_numpy()
+        for channel, weight, delta in (
+            ("bm25", config.geo_weight, 0.0),
+            ("dense", 1.0, config.geo_delta),
+        ):
+            if f"{channel}_georaw" in runs:
+                runs[f"{channel}_geo"] = geo_rerank(
+                    runs.pop(f"{channel}_georaw"), *locations, weight, delta
+                )
     return runs
 
 
