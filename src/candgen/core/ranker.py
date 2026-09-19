@@ -3,10 +3,12 @@ from dataclasses import dataclass
 
 import numpy as np
 import polars as pl
-from catboost import CatBoostRanker, Pool
+from catboost import CatBoost, CatBoostRanker, Pool
 
 from candgen.core.features import FEATURES
 from candgen.core.metrics import recall_at_k
+
+POINTWISE = ("Logloss", "CrossEntropy")
 
 
 @dataclass(frozen=True)
@@ -34,21 +36,30 @@ def train_ranker(
     valid: pl.DataFrame,
     config: RankerConfig,
     features: Sequence[str] = FEATURES,
-) -> CatBoostRanker:
-    model = CatBoostRanker(
-        loss_function=config.loss_function,
-        iterations=config.iterations,
-        learning_rate=config.learning_rate,
-        depth=config.depth,
-        random_seed=config.random_seed,
-        task_type=config.task_type,
-        eval_metric="RecallAt:top=50",
-        early_stopping_rounds=config.early_stopping_rounds or None,
-        use_best_model=config.early_stopping_rounds > 0,
-        allow_writing_files=False,
-        verbose=100,
-    )
-    model.fit(make_pool(train, features), eval_set=make_pool(valid, features))
+    params: dict | None = None,
+) -> CatBoost:
+    return fit_model(make_pool(train, features), make_pool(valid, features), config, params)
+
+
+def fit_model(
+    train: Pool, valid: Pool, config: RankerConfig, params: dict | None = None
+) -> CatBoost:
+    options = {
+        "loss_function": config.loss_function,
+        "iterations": config.iterations,
+        "learning_rate": config.learning_rate,
+        "depth": config.depth,
+        "random_seed": config.random_seed,
+        "task_type": config.task_type,
+        "eval_metric": "RecallAt:top=50",
+        "early_stopping_rounds": config.early_stopping_rounds or None,
+        "use_best_model": config.early_stopping_rounds > 0,
+        "allow_writing_files": False,
+        "verbose": 100,
+        **(params or {}),
+    }
+    model = CatBoost(options) if config.loss_function in POINTWISE else CatBoostRanker(**options)
+    model.fit(train, eval_set=valid)
     return model
 
 

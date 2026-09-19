@@ -71,11 +71,9 @@ def fixed_valid_texts(train_contexts: pl.DataFrame) -> pl.Series:
     return pl.read_parquet(VALID_TEXTS_PATH)["query_text"]
 
 
-def train_model(
+def train_frames(
     args: argparse.Namespace,
     retrieval: RetrievalConfig,
-    ranker: RankerConfig,
-    features: list[str],
     corpus: pl.DataFrame,
     train_contexts: pl.DataFrame,
     pairs: pl.DataFrame,
@@ -84,7 +82,7 @@ def train_model(
     scorer: FieldScorer,
     index: MicrocatIndex | None,
     timings: dict,
-) -> tuple[CatBoostRanker, dict]:
+) -> dict:
     train_queries = sample_eval_queries(train_contexts, args.train_queries, SEED)
     valid_texts = fixed_valid_texts(train_contexts)
     train_key = f"train{args.train_queries}"
@@ -150,10 +148,28 @@ def train_model(
         roles.filter("valid").select("q"), on="q", how="semi"
     )
     frame = frame.join(with_positive, on="q", how="semi").sort("q", "rrf_rank")
-    fit_frame = frame.filter(~pl.col("valid"))
-    valid_frame = frame.filter(pl.col("valid"))
-    del frame
+    return {
+        "fit": frame.filter(~pl.col("valid")),
+        "valid": frame.filter(pl.col("valid")),
+        "full_valid": full_valid_frame,
+        "full_valid_queries": full_valid_queries,
+        "stats": {
+            "sampled_queries": train_queries.height,
+            "queries_with_positive_in_pool": with_positive.height,
+            "excluded_valid_bucket_queries": int(roles["excluded"].sum()),
+        },
+    }
 
+
+def train_model(
+    ranker: RankerConfig,
+    features: list[str],
+    frames: dict,
+    corpus: pl.DataFrame,
+    timings: dict,
+) -> tuple[CatBoostRanker, dict]:
+    fit_frame, valid_frame = frames["fit"], frames["valid"]
+    full_valid_frame, full_valid_queries = frames["full_valid"], frames["full_valid_queries"]
     t = time.perf_counter()
     model = train_ranker(fit_frame, valid_frame, ranker, features)
     timings["train_s"] = time.perf_counter() - t
@@ -164,9 +180,7 @@ def train_model(
     )
     timings["full_valid_s"] = time.perf_counter() - t
     return model, {
-        "sampled_queries": train_queries.height,
-        "queries_with_positive_in_pool": with_positive.height,
-        "excluded_valid_bucket_queries": int(roles["excluded"].sum()),
+        **frames["stats"],
         "fit_queries": fit_frame["q"].n_unique(),
         "valid_queries": valid_frame["q"].n_unique(),
         "valid_texts_file": str(VALID_TEXTS_PATH),
@@ -262,10 +276,10 @@ def error_examples(
     return examples
 
 
-def main() -> None:
+def build_parser(required: bool = True) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--exp", required=True)
-    parser.add_argument("--variant", required=True)
+    parser.add_argument("--exp", required=required)
+    parser.add_argument("--variant", required=required)
     parser.add_argument("--parent", default=B0)
     parser.add_argument("--model", type=Path, default=None)
     parser.add_argument("--drop-features", nargs="*", default=[])
@@ -292,14 +306,14 @@ def main() -> None:
     parser.add_argument("--early-stopping-rounds", type=int, default=0)
     parser.add_argument("--task-type", choices=["CPU", "GPU"], default=RankerConfig.task_type)
     parser.add_argument("--examples", type=int, default=30)
-    args = parser.parse_args()
+    return parser
+
+
+def configure(
+    parser: argparse.ArgumentParser, args: argparse.Namespace
+) -> tuple[RetrievalConfig, RankerConfig, list[str]]:
     if not 0 <= args.local_k <= LOCAL_DEPTH:
         parser.error(f"--local-k must be between 0 and {LOCAL_DEPTH} (cached search depth)")
-
-    name = f"{args.exp}/{args.variant}"
-    out_dir = EXPERIMENTS_DIR / name
-    if (out_dir / "report.json").exists():
-        raise SystemExit(f"{out_dir} already has a report")
     retrieval = RetrievalConfig(
         global_k=args.global_k,
         local_k=args.local_k,
@@ -335,10 +349,10 @@ def main() -> None:
         task_type=args.task_type,
         early_stopping_rounds=args.early_stopping_rounds,
     )
+    return retrieval, ranker, features
 
-    started = time.perf_counter()
-    git = git_state()
-    timings: dict[str, float] = {}
+
+def prepare(args: argparse.Namespace, retrieval: RetrievalConfig, timings: dict) -> dict:
     corpus, dev_queries, seen_items = load_eval("dev")
     item_ids = corpus["item_id"].to_list()
     train_contexts = pl.read_parquet(SPLIT_DIR / "contexts_train.parquet")
@@ -418,6 +432,42 @@ def main() -> None:
         args.filter_match,
     )
     signal_info = {"centroid": args.neighbor_centroid, "filters": args.filter_match}
+    return {
+        "corpus": corpus,
+        "dev_queries": dev_queries,
+        "seen_items": seen_items,
+        "item_ids": item_ids,
+        "train_contexts": train_contexts,
+        "pairs": pairs,
+        "history_info": history_info,
+        "items": items,
+        "item_vectors": item_vectors,
+        "scorer": scorer,
+        "index": index,
+        "dev_frame": dev_frame,
+        "signal_info": signal_info,
+    }
+
+
+def main() -> None:
+    parser = build_parser()
+    args = parser.parse_args()
+    name = f"{args.exp}/{args.variant}"
+    out_dir = EXPERIMENTS_DIR / name
+    if (out_dir / "report.json").exists():
+        raise SystemExit(f"{out_dir} already has a report")
+    retrieval, ranker, features = configure(parser, args)
+
+    started = time.perf_counter()
+    git = git_state()
+    timings: dict[str, float] = {}
+    setup = prepare(args, retrieval, timings)
+    corpus, dev_queries, seen_items = setup["corpus"], setup["dev_queries"], setup["seen_items"]
+    item_ids, train_contexts, pairs = setup["item_ids"], setup["train_contexts"], setup["pairs"]
+    history_info, items, item_vectors = setup["history_info"], setup["items"], setup["item_vectors"]
+    scorer, index, dev_frame = setup["scorer"], setup["index"], setup["dev_frame"]
+    signal_info = setup["signal_info"]
+    del setup
 
     out_dir.mkdir(parents=True, exist_ok=True)
     if args.model is not None:
@@ -428,11 +478,9 @@ def main() -> None:
         model.load_model(str(args.model))
         model_path, train_info = args.model, None
     else:
-        model, train_info = train_model(
+        frames = train_frames(
             args,
             retrieval,
-            ranker,
-            features,
             corpus,
             train_contexts,
             pairs,
@@ -442,6 +490,8 @@ def main() -> None:
             index,
             timings,
         )
+        model, train_info = train_model(ranker, features, frames, corpus, timings)
+        del frames
         model_path = out_dir / "model.cbm"
         model.save_model(str(model_path))
         model_meta = {
