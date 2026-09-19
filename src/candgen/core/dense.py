@@ -14,12 +14,16 @@ from candgen.core.retrieval import Groups, Hits, order_hits, search_groups, sear
 
 EMBEDDINGS_DIR = ARTIFACTS_DIR / "embeddings"
 CHUNK_SIZE = 50_000
+REVISIONS = {
+    "intfloat/multilingual-e5-base": "d128750597153bb5987e10b1c3493a34e5a4502a",
+    "deepvk/USER-base": "e8446472f6024df155a04b2f0911b6044cabc51f",
+}
 
 
 @dataclass(frozen=True)
 class DenseConfig:
     model: str = "intfloat/multilingual-e5-base"
-    revision: str = "d128750597153bb5987e10b1c3493a34e5a4502a"
+    revision: str | None = REVISIONS["intfloat/multilingual-e5-base"]
     max_seq_length: int = 512
     params_chars: int = 500
     batch_size: int = 64
@@ -27,6 +31,10 @@ class DenseConfig:
 
     def passage_tag(self) -> str:
         return f"{self.model.split('/')[-1]}_len{self.max_seq_length}_p{self.params_chars}"
+
+
+def config_for(model: str, **kwargs) -> DenseConfig:
+    return DenseConfig(model=model, revision=REVISIONS.get(model), **kwargs)
 
 
 def default_device() -> str:

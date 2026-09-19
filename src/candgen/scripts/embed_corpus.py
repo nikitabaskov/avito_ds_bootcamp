@@ -6,6 +6,7 @@ import torch
 from candgen.core.data import SEED, load_corpus
 from candgen.core.dense import (
     DenseConfig,
+    config_for,
     embed_corpus,
     embedding_dir,
     load_model,
@@ -17,12 +18,14 @@ from candgen.core.dense import (
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--corpus", choices=["split", "benchmark"], default="split")
+    parser.add_argument("--model", default=DenseConfig.model)
     parser.add_argument("--params-chars", type=int, default=DenseConfig.params_chars)
     parser.add_argument("--max-seq-length", type=int, default=DenseConfig.max_seq_length)
     parser.add_argument("--batch-size", type=int, default=DenseConfig.batch_size)
     parser.add_argument("--truncation-sample", type=int, default=5_000)
     args = parser.parse_args()
-    config = DenseConfig(
+    config = config_for(
+        args.model,
         params_chars=args.params_chars,
         max_seq_length=args.max_seq_length,
         batch_size=args.batch_size,

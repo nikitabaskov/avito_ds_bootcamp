@@ -63,15 +63,8 @@ def recall_with(
     return out
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=Path, default=MODEL)
-    parser.add_argument("--output", type=Path, default=EXPERIMENTS_DIR / "stage1" / "signals")
-    args = parser.parse_args()
-
-    started = time.perf_counter()
-    timings: dict[str, float] = {}
-    meta = json.loads(args.model.with_suffix(".json").read_text())
+def scored_dev_frame(model_path: Path, timings: dict) -> dict:
+    meta = json.loads(model_path.with_suffix(".json").read_text())
     config, spec = model_config(meta), feature_spec(meta)
     corpus, queries, _ = load_eval("dev")
     contexts = pl.read_parquet(SPLIT_DIR / "contexts_train.parquet")
@@ -85,7 +78,7 @@ def main() -> None:
 
     frame = feature_frame(spec, config, "split", corpus, queries, "dev", items, pairs, timings)
     model = CatBoostRanker()
-    model.load_model(str(args.model))
+    model.load_model(str(model_path))
     labels = pl.DataFrame(
         [(q, r) for q, rel in enumerate(relevant) for r in rel], schema=["q", "row"], orient="row"
     ).with_columns(
@@ -98,6 +91,29 @@ def main() -> None:
         .join(labels, on=["q", "row"], how="left")
         .with_columns(pl.col("label").fill_null(0))
     )
+    return {
+        "frame": frame,
+        "config": config,
+        "corpus": corpus,
+        "queries": queries,
+        "pairs": pairs,
+        "items": items,
+        "item_row": item_row,
+        "relevant": relevant,
+    }
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", type=Path, default=MODEL)
+    parser.add_argument("--output", type=Path, default=EXPERIMENTS_DIR / "stage1" / "signals")
+    args = parser.parse_args()
+
+    started = time.perf_counter()
+    timings: dict[str, float] = {}
+    dev = scored_dev_frame(args.model, timings)
+    frame, config, corpus, queries = dev["frame"], dev["config"], dev["corpus"], dev["queries"]
+    pairs, items, item_row, relevant = dev["pairs"], dev["items"], dev["item_row"], dev["relevant"]
 
     t = time.perf_counter()
     embeddings = load_corpus_embeddings(config.dense_config, "split", corpus, timings)
