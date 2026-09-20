@@ -1,4 +1,5 @@
-import json
+"""Общие пути, загрузка dev/test и учёт памяти процесса."""
+
 import resource
 
 import polars as pl
@@ -19,12 +20,3 @@ def load_eval(part: str) -> tuple[pl.DataFrame, pl.DataFrame, set[str]]:
 
 def peak_rss_gb() -> float:
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024**2
-
-
-def write_report(name: str, report: dict) -> None:
-    out = EXPERIMENTS_DIR / f"{name}.json"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    text = json.dumps(report, indent=2, ensure_ascii=False)
-    out.write_text(text)
-    print(text)
-    print(f"saved {out}")

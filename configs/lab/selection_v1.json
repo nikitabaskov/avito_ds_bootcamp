@@ -1,9 +1,0 @@
-[
-  {"name": "logloss_gpu", "loss": "Logloss", "seeds": [42, 43, 44]},
-  {"name": "logloss_cpu", "loss": "Logloss", "task_type": "CPU", "seeds": [42, 43, 44]},
-  {"name": "logloss_gpu_lr10_i1000", "loss": "Logloss", "lr": 0.1, "iterations": 1000, "seeds": [42, 43, 44]},
-  {"name": "logloss_gpu_d8_i1000", "loss": "Logloss", "depth": 8, "iterations": 1000, "seeds": [42, 43, 44]},
-  {"name": "yeti_gpu", "loss": "YetiRank", "seeds": [42, 43, 44]},
-  {"name": "querysoftmax_gpu", "loss": "QuerySoftMax", "seeds": [42, 43, 44]},
-  {"name": "yeti_gpu_i1500", "loss": "YetiRank", "iterations": 1500, "seeds": [42, 43, 44]}
-]

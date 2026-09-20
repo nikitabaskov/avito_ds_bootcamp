@@ -1,3 +1,5 @@
+"""Лексический поиск по русским текстам с отдельными географическими списками."""
+
 import os
 from dataclasses import dataclass
 

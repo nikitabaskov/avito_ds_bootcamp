@@ -1,3 +1,5 @@
+"""Подготовка контекстов и разбиение по тексту без пересечения запросов."""
+
 import hashlib
 from collections.abc import Iterable
 from pathlib import Path

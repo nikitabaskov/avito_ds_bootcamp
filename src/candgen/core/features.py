@@ -1,3 +1,5 @@
+"""Пул кандидатов и признаки пары запрос–объявление; ID не являются признаками."""
+
 import re
 from collections.abc import Sequence
 

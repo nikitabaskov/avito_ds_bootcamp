@@ -1,3 +1,5 @@
+"""Полевые BM25-признаки; отключены в итоговой конфигурации."""
+
 import polars as pl
 
 from candgen.core.bm25 import BM25Config, BM25Retriever

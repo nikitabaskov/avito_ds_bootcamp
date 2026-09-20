@@ -16,3 +16,8 @@ PROJECT_PLAN.md
 CLAUDE.md
 AGENTS.md
 artifacts
+
+.pytest_cache/
+.ruff_cache/
+/answer.csv
+/answer.meta.json

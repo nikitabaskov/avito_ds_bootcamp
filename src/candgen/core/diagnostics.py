@@ -1,3 +1,5 @@
+"""Разделение ошибок поиска и отбора на уровне запросов и позитивов."""
+
 from collections.abc import Sequence
 
 import numpy as np

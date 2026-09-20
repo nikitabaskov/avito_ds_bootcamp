@@ -1,3 +1,5 @@
+"""Локальные энкодеры и точный поиск по нормализованным векторам."""
+
 import hashlib
 import json
 import time
@@ -72,12 +74,14 @@ def query_texts(queries: pl.DataFrame, with_filters: bool) -> list[str]:
 def load_model(config: DenseConfig, device: str | None = None) -> SentenceTransformer:
     device = device or default_device()
     if config.model in EXPLICIT_MODULES:
-        path = snapshot_download(config.model, revision=config.revision)
+        path = snapshot_download(config.model, revision=config.revision, local_files_only=True)
         body = models.Transformer(path, max_seq_length=config.max_seq_length)
         pooling = models.Pooling(body.get_embedding_dimension(), "mean")
         model = SentenceTransformer(modules=[body, pooling, models.Normalize()], device=device)
     else:
-        model = SentenceTransformer(config.model, revision=config.revision, device=device)
+        model = SentenceTransformer(
+            config.model, revision=config.revision, device=device, local_files_only=True
+        )
     if model.max_seq_length != config.max_seq_length:
         model.max_seq_length = config.max_seq_length
     if device == "cuda":
@@ -149,7 +153,7 @@ def embed_corpus(
 def load_embeddings(out_dir: Path, item_ids: list[str]) -> np.ndarray:
     meta_path = out_dir / "meta.json"
     if not meta_path.exists():
-        raise FileNotFoundError(f"no embeddings in {out_dir}; run candgen.scripts.embed_corpus")
+        raise FileNotFoundError(f"no embeddings in {out_dir}; run candgen.workflows.embed_corpus")
     meta = json.loads(meta_path.read_text())
     if meta["item_ids_sha256"] != ids_digest(item_ids):
         raise ValueError(f"embeddings in {out_dir} do not match corpus item_id order")

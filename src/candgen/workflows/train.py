@@ -1,3 +1,5 @@
+"""Обучение итогового CatBoost и диагностика качества на фиксированном dev."""
+
 import argparse
 import dataclasses
 import json
@@ -10,31 +12,26 @@ import torch
 from catboost import CatBoostRanker
 
 from candgen.core.data import SEED, SPLIT_DIR, sample_eval_queries, stable_hash
-from candgen.core.dense import DenseConfig, config_for, default_device
+from candgen.core.dense import default_device
 from candgen.core.diagnostics import error_map, positive_outcomes, query_outcomes
 from candgen.core.evaluation import compare_per_query, recall_report
 from candgen.core.features import ItemTable, attach_labels
-from candgen.core.fields import FIELD_FEATURES, FIELD_MODES, FieldScorer
+from candgen.core.fields import FieldScorer
 from candgen.core.history import (
     FOLDS,
-    GEO_MODES,
-    TRANSITION_MODES,
     add_history_features,
     crossfit_views,
     full_view,
-    history_features,
     history_pairs,
     location_centers,
     query_centers,
 )
 from candgen.core.metrics import recall_at_k
-from candgen.core.microcats import MICROCAT_FEATURES, MICROCAT_MODES, MicrocatIndex
+from candgen.core.microcats import MicrocatIndex
 from candgen.core.ranker import RankerConfig, full_recall_curve, make_pool, select_top, train_ranker
-from candgen.core.signals import CENTROID_FEATURES, ENCODER_FEATURES, FILTER_FEATURES
-from candgen.scripts.common import EXPERIMENTS_DIR, load_eval, peak_rss_gb
-from candgen.scripts.predict import git_state
-from candgen.scripts.runs import (
-    LOCAL_DEPTH,
+from candgen.workflows.common import EXPERIMENTS_DIR, load_eval, peak_rss_gb
+from candgen.workflows.predict import git_state
+from candgen.workflows.runs import (
     RetrievalConfig,
     load_corpus_embeddings,
     microcat_features,
@@ -47,7 +44,6 @@ from candgen.scripts.runs import (
 )
 
 PROTOCOL = "v2"
-TREES = 500
 B0 = "EXP-000/b0"
 VALID_BASE_QUERIES = 6000
 VALID_SHARE = 0.1
@@ -92,6 +88,7 @@ def train_frames(
         excluded=valid_bucket(train_queries["query_text"])
         & ~pl.col("query_text").is_in(valid_texts.implode()),
     )
+    # A query must not see its own text in history-derived training features.
     views = crossfit_views(train_queries, pairs, roles.filter("valid").select("q"))
     runs = retrieve(
         retrieval,
@@ -277,97 +274,46 @@ def error_examples(
     return examples
 
 
-def build_parser(required: bool = True) -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--exp", required=required)
-    parser.add_argument("--variant", required=required)
-    parser.add_argument("--parent", default=B0)
-    parser.add_argument("--model", type=Path, default=None)
-    parser.add_argument("--drop-features", nargs="*", default=[])
-    parser.add_argument("--geo-history", choices=GEO_MODES, default="none")
-    parser.add_argument("--transitions", choices=TRANSITION_MODES, default="none")
-    parser.add_argument("--transition-alpha", type=float, default=10.0)
-    parser.add_argument("--geo-damping", action="store_true")
-    parser.add_argument("--field-scores", choices=FIELD_MODES, default="none")
-    parser.add_argument("--microcats", choices=MICROCAT_MODES, default="none")
-    parser.add_argument("--neighbor-centroid", action="store_true")
-    parser.add_argument("--filter-match", action="store_true")
-    parser.add_argument("--global-k", type=int, default=RetrievalConfig.global_k)
-    parser.add_argument("--local-k", type=int, default=RetrievalConfig.local_k)
-    parser.add_argument("--radius-km", type=float, default=RetrievalConfig.radius_km)
-    parser.add_argument("--radius-k", type=int, default=RetrievalConfig.radius_k)
-    parser.add_argument("--region-k", type=int, default=RetrievalConfig.region_k)
-    parser.add_argument("--geo-km", type=float, default=RetrievalConfig.geo_km)
-    parser.add_argument("--geo-k", type=int, default=RetrievalConfig.geo_k)
-    parser.add_argument("--geo-weight", type=float, default=RetrievalConfig.geo_weight)
-    parser.add_argument("--geo-delta", type=float, default=RetrievalConfig.geo_delta)
-    parser.add_argument("--e5-query-no-filters", action="store_true")
-    parser.add_argument("--dense-model", default=DenseConfig.model)
-    parser.add_argument("--second-encoder", default=None)
-    parser.add_argument("--train-queries", type=int, default=VALID_BASE_QUERIES)
-    parser.add_argument("--iterations", type=int, default=TREES)
-    parser.add_argument("--loss-function", default=RankerConfig.loss_function)
-    parser.add_argument("--learning-rate", type=float, default=RankerConfig.learning_rate)
-    parser.add_argument("--depth", type=int, default=RankerConfig.depth)
-    parser.add_argument("--seed", type=int, default=RankerConfig.random_seed)
-    parser.add_argument("--early-stopping-rounds", type=int, default=0)
-    parser.add_argument("--task-type", choices=["CPU", "GPU"], default=RankerConfig.task_type)
-    parser.add_argument("--examples", type=int, default=30)
-    return parser
-
-
-def configure(
-    parser: argparse.ArgumentParser, args: argparse.Namespace
-) -> tuple[RetrievalConfig, RankerConfig, list[str]]:
-    if not 0 <= args.local_k <= LOCAL_DEPTH:
-        parser.error(f"--local-k must be between 0 and {LOCAL_DEPTH} (cached search depth)")
-    retrieval = RetrievalConfig(
-        global_k=args.global_k,
-        local_k=args.local_k,
-        radius_km=args.radius_km,
-        radius_k=args.radius_k,
-        region_k=args.region_k,
-        geo_km=args.geo_km,
-        geo_k=args.geo_k,
-        geo_weight=args.geo_weight,
-        geo_delta=args.geo_delta,
-        dense_config=config_for(args.dense_model, query_filters=not args.e5_query_no_filters),
+def parse_config() -> tuple[argparse.Namespace, RetrievalConfig, RankerConfig, list[str]]:
+    """Restore the final feature contract; write new models to a separate run."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", type=Path, default=Path("configs/final.json"))
+    parser.add_argument("--name", default="retrained")
+    parser.add_argument(
+        "--model", type=Path, help="Evaluate an existing model on dev without training"
     )
-    if retrieval.radius_k and retrieval.radius_km <= 0:
-        parser.error("--radius-k needs a positive --radius-km")
-    if retrieval.geo_k and retrieval.geo_km <= 0:
-        parser.error("--geo-k needs a positive --geo-km")
-    if args.geo_damping and args.geo_history == "none":
-        parser.error("--geo-damping needs --geo-history")
-    if (args.neighbor_centroid or args.region_k) and args.microcats == "none":
-        parser.error("--neighbor-centroid and --region-k need --microcats")
-    available = [
-        *retrieval.features(),
-        *FIELD_FEATURES[args.field_scores],
-        *history_features(args.geo_history, args.transitions, args.geo_damping),
-        *MICROCAT_FEATURES[args.microcats],
-        *(CENTROID_FEATURES if args.neighbor_centroid else []),
-        *(FILTER_FEATURES if args.filter_match else []),
-        *(ENCODER_FEATURES if args.second_encoder else []),
-    ]
-    unknown = set(args.drop_features) - set(available)
-    if unknown:
-        parser.error(f"unknown features: {sorted(unknown)}")
-    features = [f for f in available if f not in args.drop_features]
-    ranker = RankerConfig(
-        loss_function=args.loss_function,
-        iterations=args.iterations,
-        learning_rate=args.learning_rate,
-        depth=args.depth,
-        random_seed=args.seed,
-        task_type=args.task_type,
-        early_stopping_rounds=args.early_stopping_rounds,
+    parser.add_argument("--part", choices=["dev", "test"], default="dev")
+    cli = parser.parse_args()
+    meta = json.loads(cli.config.read_text())
+    from candgen.workflows.predict import expected_features, feature_spec, model_config
+
+    retrieval = model_config(meta)
+    spec = feature_spec(meta)
+    if expected_features(spec, retrieval) != meta["features"]:
+        parser.error("configuration has an inconsistent feature list")
+    args = argparse.Namespace(
+        name=cli.name,
+        model=cli.model,
+        part=cli.part,
+        parent=meta["submission"]["experiment"],
+        train_queries=meta["train_queries"],
+        geo_history=spec["geo"],
+        transitions=spec["transitions"],
+        transition_alpha=spec["alpha"],
+        geo_damping=spec["damping"],
+        field_scores=spec["fields"],
+        microcats=spec["microcats"],
+        neighbor_centroid=spec["centroid"],
+        filter_match=spec["filters"],
+        second_encoder=spec["encoder"],
+        examples=30,
+        drop_features=[],
     )
-    return retrieval, ranker, features
+    return args, retrieval, RankerConfig(**meta["ranker"]), meta["features"]
 
 
 def prepare(args: argparse.Namespace, retrieval: RetrievalConfig, timings: dict) -> dict:
-    corpus, dev_queries, seen_items = load_eval("dev")
+    corpus, dev_queries, seen_items = load_eval(args.part)
     item_ids = corpus["item_id"].to_list()
     train_contexts = pl.read_parquet(SPLIT_DIR / "contexts_train.parquet")
     valid_texts = fixed_valid_texts(train_contexts)
@@ -386,7 +332,7 @@ def prepare(args: argparse.Namespace, retrieval: RetrievalConfig, timings: dict)
         "transitions": args.transitions,
         "transition_alpha": args.transition_alpha if args.transitions != "none" else None,
         "geo_damping": args.geo_damping,
-        "dev_queries_with_center": int(dev_centers["hist_lat"].is_not_null().sum()),
+        f"{args.part}_queries_with_center": int(dev_centers["hist_lat"].is_not_null().sum()),
     }
     del history
 
@@ -398,7 +344,7 @@ def prepare(args: argparse.Namespace, retrieval: RetrievalConfig, timings: dict)
         "split",
         corpus,
         dev_queries,
-        "dev",
+        args.part,
         timings,
         query_centers(dev_views, items) if retrieval.radius_k or retrieval.geo_k else None,
     )
@@ -415,11 +361,13 @@ def prepare(args: argparse.Namespace, retrieval: RetrievalConfig, timings: dict)
         else None
     )
     dev_runs |= region_runs(
-        retrieval, index, dev_views, dev_queries, corpus, items, item_vectors, "dev", timings
+        retrieval, index, dev_views, dev_queries, corpus, items, item_vectors, args.part, timings
     )
     dev_frame = add_history_features(
         scorer.add(
-            pool_features(retrieval, dev_runs, dev_queries, "dev", items, item_vectors, timings),
+            pool_features(
+                retrieval, dev_runs, dev_queries, args.part, items, item_vectors, timings
+            ),
             dev_queries,
         ),
         dev_views,
@@ -430,7 +378,7 @@ def prepare(args: argparse.Namespace, retrieval: RetrievalConfig, timings: dict)
         args.geo_damping,
     )
     dev_frame = microcat_features(
-        retrieval.dense_config, index, dev_frame, dev_views, dev_queries, corpus, "dev", timings
+        retrieval.dense_config, index, dev_frame, dev_views, dev_queries, corpus, args.part, timings
     )
     dev_frame = signal_features(
         retrieval.dense_config,
@@ -440,7 +388,7 @@ def prepare(args: argparse.Namespace, retrieval: RetrievalConfig, timings: dict)
         dev_queries,
         corpus,
         item_vectors,
-        "dev",
+        args.part,
         timings,
         args.neighbor_centroid,
         args.filter_match,
@@ -469,13 +417,11 @@ def prepare(args: argparse.Namespace, retrieval: RetrievalConfig, timings: dict)
 
 
 def main() -> None:
-    parser = build_parser()
-    args = parser.parse_args()
-    name = f"{args.exp}/{args.variant}"
+    args, retrieval, ranker, features = parse_config()
+    name = args.name
     out_dir = EXPERIMENTS_DIR / name
     if (out_dir / "report.json").exists():
         raise SystemExit(f"{out_dir} already has a report")
-    retrieval, ranker, features = configure(parser, args)
 
     started = time.perf_counter()
     git = git_state()
@@ -493,6 +439,9 @@ def main() -> None:
         model_meta = json.loads(args.model.with_suffix(".json").read_text())
         if model_meta["features"] != features:
             raise SystemExit(f"{args.model} was trained with different features")
+        saved_retrieval = json.loads(json.dumps(dataclasses.asdict(retrieval)))
+        if model_meta["retrieval"] != saved_retrieval:
+            raise SystemExit(f"{args.model} was trained with different retrieval settings")
         model = CatBoostRanker()
         model.load_model(str(args.model))
         model_path, train_info = args.model, None
@@ -548,6 +497,7 @@ def main() -> None:
     positives.write_parquet(out_dir / "positives.parquet")
     report = {
         "experiment": name,
+        "part": args.part,
         "protocol": PROTOCOL,
         "parent": args.parent,
         "git": git,
@@ -568,8 +518,10 @@ def main() -> None:
             "p95": float(np.percentile(pool_sizes, 95)),
             "empty_queries": dev_queries.height - len(pool_sizes),
         },
-        "vs_b0": compare(per_query, B0) if name != B0 else None,
-        "vs_parent": compare(per_query, args.parent) if name != args.parent else None,
+        "vs_b0": compare(per_query, B0) if name != B0 and args.part == "dev" else None,
+        "vs_parent": (
+            compare(per_query, args.parent) if name != args.parent and args.part == "dev" else None
+        ),
         "slices": {
             **summary["slices"],
             "no_center": {

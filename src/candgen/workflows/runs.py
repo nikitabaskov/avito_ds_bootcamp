@@ -1,3 +1,5 @@
+"""Поисковые списки и эмбеддинги с кэшированием промежуточных вычислений."""
+
 import functools
 import hashlib
 import time
@@ -9,7 +11,7 @@ import numpy as np
 import polars as pl
 import torch
 
-from candgen.core import bm25, crossenc, dense, signals
+from candgen.core import bm25, dense, signals
 from candgen.core.data import ARTIFACTS_DIR, load_corpus
 from candgen.core.features import FEATURES, ItemTable, build_features, candidate_pool, list_features
 from candgen.core.history import HistoryView
@@ -328,37 +330,6 @@ def signal_features(
             corpus["item_infm_params_text"].fill_null(""),
         )
         timings[f"{run_key}_filters_s"] = time.perf_counter() - t
-    return frame
-
-
-def cross_encoder_features(
-    config: crossenc.CrossEncoderConfig | None,
-    frame: pl.DataFrame,
-    queries: pl.DataFrame,
-    corpus: pl.DataFrame,
-    run_key: str,
-    timings: dict,
-) -> pl.DataFrame:
-    if config is None:
-        return frame
-    pairs = crossenc.scored_pairs(frame, config.top_k)
-    digest = hashlib.sha256(
-        pairs["q"].to_numpy().tobytes()
-        + pairs["row"].to_numpy().tobytes()
-        + "\n".join(queries["query_id"].to_list()).encode()
-    ).hexdigest()[:12]
-    path = RUNS_DIR / run_key / f"ce_{config.tag()}_{digest}.npz"
-    if path.exists():
-        scores = np.load(path)["scores"]
-    else:
-        t = time.perf_counter()
-        scores = crossenc.score(config, pairs, queries, corpus)
-        timings[f"{run_key}_cross_encoder_s"] = time.perf_counter() - t
-        path.parent.mkdir(parents=True, exist_ok=True)
-        np.savez(path, scores=scores)
-    t = time.perf_counter()
-    frame = crossenc.add_cross_encoder_features(frame, pairs.with_columns(ce_score=scores))
-    timings[f"{run_key}_cross_encoder_features_s"] = time.perf_counter() - t
     return frame
 
 

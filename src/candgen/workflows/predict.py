@@ -1,13 +1,12 @@
+"""Генерация answer.csv из итоговой модели с проверкой входов и результата."""
+
 import argparse
 import dataclasses
 import json
-import re
 import subprocess
 import time
-from datetime import datetime
 from pathlib import Path
 
-import numpy as np
 import polars as pl
 import torch
 
@@ -32,16 +31,14 @@ from candgen.core.history import (
 from candgen.core.microcats import MICROCAT_FEATURES
 from candgen.core.signals import CENTROID_FEATURES, ENCODER_FEATURES, FILTER_FEATURES
 from candgen.core.submission import (
-    ANSWER_K,
     answer_frame,
     read_answer,
     sha256_file,
     validate_answer,
 )
-from candgen.scripts.common import EXPERIMENTS_DIR, peak_rss_gb
-from candgen.scripts.runs import (
+from candgen.workflows.common import peak_rss_gb
+from candgen.workflows.runs import (
     RetrievalConfig,
-    fuse,
     load_corpus_embeddings,
     microcat_features,
     microcat_index,
@@ -52,20 +49,9 @@ from candgen.scripts.runs import (
     signal_features,
 )
 
-OUTPUT_DIR = Path("data/output")
+DEFAULT_CONFIG = Path("configs/final.json")
 QUERIES_PATH = INPUT_DIR / "benchmark_queries.parquet"
 ITEMS_PATH = INPUT_DIR / "benchmark_items.parquet"
-
-
-def next_output_dir(tag: str) -> Path:
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    taken = [int(p.name[:3]) for p in OUTPUT_DIR.iterdir() if re.match(r"\d{3}_", p.name)]
-    path = (
-        OUTPUT_DIR
-        / f"{max(taken, default=0) + 1:03d}_{datetime.now().astimezone():%Y%m%d-%H%M%S}_{tag}"
-    )
-    path.mkdir()
-    return path
 
 
 def git_state() -> dict:
@@ -74,27 +60,16 @@ def git_state() -> dict:
             ["git", *args], capture_output=True, text=True, check=True
         ).stdout.strip()
 
-    return {
-        "commit": git("rev-parse", "HEAD"),
-        "dirty": bool(git("status", "--porcelain", "--", "src", "pyproject.toml", "uv.lock")),
-    }
-
-
-def dev_summary(report_name: str, model_path: Path | None = None) -> dict | None:
-    path = (
-        model_path.parent / "report.json" if model_path else EXPERIMENTS_DIR / f"{report_name}.json"
-    )
-    if not path.exists():
-        path = EXPERIMENTS_DIR / f"{report_name}.json"
-    if not path.exists():
-        return None
-    report = json.loads(path.read_text())
-    recall = report["recall"]["@50"] if "recall" in report else report["recall@50"]
-    return {
-        "report": str(path),
-        "recall@50": recall,
-        "pool_recall": report.get("pool_recall", report.get("recall", {}).get("@1000")),
-    }
+    try:
+        return {
+            "commit": git("rev-parse", "HEAD"),
+            "dirty": bool(
+                git("status", "--porcelain", "--", "src", "configs", "pyproject.toml", "uv.lock")
+            ),
+        }
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        # A downloaded source archive has no .git directory.
+        return {"commit": None, "dirty": None}
 
 
 def benchmark_history(timings: dict) -> tuple[pl.DataFrame, dict]:
@@ -293,71 +268,81 @@ def rank_with_model(
     }
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--method", choices=["rrf", "catboost"], default="rrf")
-    parser.add_argument("--model", type=Path, default=None)
-    parser.add_argument("--tag", default=None)
-    parser.add_argument("--microcat-exact", action="store_true")
-    args = parser.parse_args()
-    if args.method == "catboost" and args.model is None:
-        parser.error("--model is required for catboost")
-    config = RetrievalConfig()
-    meta: dict = {}
-    if args.method == "catboost":
-        meta = json.loads(args.model.with_suffix(".json").read_text())
-        config = model_config(meta)
+def verify_file(path: Path, expected: str) -> None:
+    """Reject changed inputs before reusing retrieval and embedding caches."""
+    if not path.is_file():
+        raise FileNotFoundError(f"Missing {path}. See README.md for data and model preparation.")
+    if sha256_file(path) != expected:
+        raise ValueError(f"SHA-256 mismatch: {path}")
 
+
+def main() -> None:
+    """Run the submitted configuration and verify the resulting CSV."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument(
+        "--model", type=Path, help="Use a retrained model; exact submission hash is not enforced"
+    )
+    parser.add_argument("--output", type=Path, default=Path("answer.csv"))
+    args = parser.parse_args()
+    if args.output.exists():
+        parser.error(f"{args.output} already exists; choose another --output")
+    meta = json.loads(args.config.read_text())
+    submission = meta.pop("submission")
+    model_path = args.model or Path(submission["model_path"])
+    for name, digest in submission["inputs_sha256"].items():
+        verify_file(INPUT_DIR / name, digest)
+    if args.model is None:
+        verify_file(model_path, submission["model_sha256"])
+    else:
+        # A retrained model must declare the same ordered feature contract.
+        trained = json.loads(model_path.with_suffix(".json").read_text())
+        for key in ("features", "retrieval", "ranker", "field_scores", "microcats", "signals"):
+            if trained[key] != meta[key]:
+                parser.error(f"retrained model has a different {key}")
+    config = model_config(meta)
     queries = prepare_queries(pl.read_parquet(QUERIES_PATH))
     corpus = load_corpus("benchmark")
-    item_ids = corpus["item_id"].to_list()
     query_ids = queries["query_id"].to_list()
-
+    item_ids = corpus["item_id"].to_list()
     timings: dict[str, float] = {}
     started = time.perf_counter()
-    if args.method == "rrf":
-        runs = retrieve(config, "benchmark", corpus, queries, "benchmark", timings)
-        predictions = rows_to_ids(item_ids, fuse(config, runs, timings))
-        report_name = config.report_name("dev")
-        model_meta = None
-    else:
-        predictions, model_meta = rank_with_model(
-            args.model, meta, config, corpus, queries, timings, args.microcat_exact
-        )
-        report_name = f"catboost_dev_{args.model.stem.removeprefix('ranker_')}"
-    timings["total_s"] = time.perf_counter() - started
-
+    predictions, model_meta = rank_with_model(model_path, meta, config, corpus, queries, timings)
     answer = answer_frame(query_ids, predictions)
     errors = validate_answer(answer, query_ids, item_ids)
     if errors:
         raise SystemExit("invalid answer:\n" + "\n".join(errors[:20]))
-
-    out_dir = next_output_dir(args.tag or args.method)
-    path = out_dir / "answer.csv"
-    answer.write_csv(path)
-    written = read_answer(path)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    answer.write_csv(args.output)
+    written = read_answer(args.output)
     if not written.equals(answer) or validate_answer(written, query_ids, item_ids):
-        raise SystemExit(f"{path} does not round-trip")
-
-    sizes = np.array([len(p[:ANSWER_K]) for p in predictions])
-    meta = {
-        "method": args.method,
-        "created": datetime.now().astimezone().isoformat(timespec="seconds"),
-        "retrieval": dataclasses.asdict(config),
+        raise SystemExit(f"{args.output} does not round-trip")
+    digest = sha256_file(args.output)
+    matches = digest == submission["answer_sha256"]
+    timings["total_s"] = time.perf_counter() - started
+    report = {
+        "config": str(args.config),
         "model": model_meta,
-        "dev": dev_summary(report_name, args.model),
         "git": git_state(),
-        "answer_sha256": sha256_file(path),
-        "inputs_sha256": {p.name: sha256_file(p) for p in (QUERIES_PATH, ITEMS_PATH)},
+        "answer_sha256": digest,
+        "matches_submission": matches,
         "queries": len(query_ids),
         "corpus_items": corpus.height,
-        "answer_sizes": {"min": int(sizes.min()), "mean": float(sizes.mean())},
         "timings": timings,
         "peak_rss_gb": peak_rss_gb(),
     }
-    (out_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False))
-    print(json.dumps(meta, indent=2, ensure_ascii=False))
-    print(f"saved {path}")
+    args.output.with_suffix(".meta.json").write_text(
+        json.dumps(report, indent=2, ensure_ascii=False)
+    )
+    print(
+        json.dumps(
+            {"output": str(args.output), "sha256": digest, "matches_submission": matches}, indent=2
+        )
+    )
+    if args.model is None and not matches:
+        raise SystemExit(
+            "CSV differs from submission. Check artifact versions and execution environment."
+        )
 
 
 if __name__ == "__main__":

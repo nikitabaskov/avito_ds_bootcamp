@@ -1,3 +1,5 @@
+"""Контрастивное дообучение с hard negatives и батчами без повторов."""
+
 import time
 from collections import deque
 
@@ -17,6 +19,7 @@ def pick_triples(
     anchors, pos, neg = [], [], []
     for a, (rows, seen, found) in enumerate(zip(positives, known, hits, strict=True)):
         candidates = found[band[0] : band[1]]
+        # Other observed positives of this text are not valid hard negatives.
         candidates = candidates[(candidates >= 0) & ~np.isin(candidates, seen)]
         if rows.size and candidates.size:
             anchors.append(a)

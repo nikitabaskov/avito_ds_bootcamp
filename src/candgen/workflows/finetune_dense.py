@@ -1,3 +1,5 @@
+"""Дообучение E5 на текстах вне выборки ранжировщика."""
+
 import argparse
 import json
 import time
@@ -18,8 +20,8 @@ from candgen.core.data import (
     sample_eval_queries,
     stable_hash,
 )
-from candgen.scripts.predict import git_state
-from candgen.scripts.runs import load_corpus_embeddings
+from candgen.workflows.predict import git_state
+from candgen.workflows.runs import load_corpus_embeddings
 
 MODELS_DIR = ARTIFACTS_DIR / "models"
 NEGATIVE_DEPTH = 100
@@ -115,7 +117,9 @@ def main() -> None:
     if args.dry_run:
         return
 
-    model = SentenceTransformer(base.model, revision=base.revision, device=dense.default_device())
+    model = SentenceTransformer(
+        base.model, revision=base.revision, device=dense.default_device(), local_files_only=True
+    )
     model.max_seq_length = args.max_seq_length
     model.gradient_checkpointing_enable()
     t = time.perf_counter()

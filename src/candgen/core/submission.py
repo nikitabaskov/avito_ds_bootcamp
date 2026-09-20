@@ -1,3 +1,5 @@
+"""Формирование и валидация формата платформы без преобразования строковых ID."""
+
 import hashlib
 import re
 from collections.abc import Collection, Sequence

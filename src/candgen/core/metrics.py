@@ -1,3 +1,5 @@
+"""Полнота по исходным позитивам: каждому запросу соответствует одинаковый вес."""
+
 from collections.abc import Collection, Sequence
 
 import numpy as np

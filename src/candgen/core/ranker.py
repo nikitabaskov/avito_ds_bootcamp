@@ -1,3 +1,5 @@
+"""Обучение CatBoost и стабильный top-k с RRF как вторичным порядком."""
+
 from collections.abc import Sequence
 from dataclasses import dataclass
 

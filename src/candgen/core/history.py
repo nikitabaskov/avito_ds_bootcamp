@@ -1,3 +1,5 @@
+"""Агрегаты train-истории с исключением своего фолда при обучении."""
+
 import numpy as np
 import polars as pl
 

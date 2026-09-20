@@ -1,3 +1,5 @@
+"""Дополнительные текстовые и исторические сигналы для отбора кандидатов."""
+
 import re
 
 import numpy as np
@@ -114,6 +116,7 @@ def text_item_means(
     t_idx = torch.tensor([text_pos[t] for t in unique["query_text"]], device=embeddings.device)
     r_idx = torch.tensor([item_row[i] for i in unique["item_id"]], device=embeddings.device)
     sums = torch.zeros(len(texts), embeddings.shape[1], device=embeddings.device)
+    # Keep the submitted float32 aggregation; changing order/precision may change ties.
     sums.index_add_(0, t_idx, embeddings[r_idx].float())
     counts = torch.bincount(t_idx, minlength=len(texts)).clamp(min=1).unsqueeze(1)
     return sums / counts

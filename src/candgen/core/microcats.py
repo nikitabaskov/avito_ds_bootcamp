@@ -1,3 +1,5 @@
+"""Распределение микрокатегорий по семантически близким историческим запросам."""
+
 import numpy as np
 import polars as pl
 import torch

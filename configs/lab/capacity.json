@@ -1,7 +1,0 @@
-[
-  {"name": "core", "seeds": [42, 43, 44], "drop": ["filt_vid", "filt_tip", "filt_share"]},
-  {"name": "core_d8", "seeds": [42, 43, 44], "drop": ["filt_vid", "filt_tip", "filt_share"], "depth": 8, "baseline": "core"},
-  {"name": "core_i1000_d8", "seeds": [42, 43, 44], "drop": ["filt_vid", "filt_tip", "filt_share"], "depth": 8, "iterations": 1000, "baseline": "core"},
-  {"name": "core_i1500", "seeds": [42, 43, 44], "drop": ["filt_vid", "filt_tip", "filt_share"], "iterations": 1500, "baseline": "core"},
-  {"name": "core_i1500_lr03", "seeds": [42, 43, 44], "drop": ["filt_vid", "filt_tip", "filt_share"], "iterations": 1500, "lr": 0.03, "baseline": "core"}
-]

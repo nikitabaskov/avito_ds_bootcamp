@@ -1,6 +1,0 @@
-[
-  {"name": "core", "seeds": [42, 43, 44], "drop": ["filt_vid", "filt_tip", "filt_share"]},
-  {"name": "core_filter", "seeds": [42, 43, 44], "drop": [], "baseline": "core"},
-  {"name": "core_nodamp", "seeds": [42, 43, 44], "drop": ["filt_vid", "filt_tip", "filt_share", "geo_unreliable", "log_dist_clean"], "baseline": "core"},
-  {"name": "core_i1000", "seeds": [42, 43, 44], "drop": ["filt_vid", "filt_tip", "filt_share"], "iterations": 1000, "baseline": "core"}
-]

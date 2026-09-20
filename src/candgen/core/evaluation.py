@@ -1,3 +1,5 @@
+"""Оценка на фиксированных запросах, срезы и парный bootstrap."""
+
 import numpy as np
 import polars as pl
 
