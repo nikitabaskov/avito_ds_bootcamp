@@ -86,17 +86,16 @@ def main() -> None:
     item_ids = setup["item_ids"]
     del setup
     torch.cuda.empty_cache()
-    dev_pool = make_pool(dev_frame, features)
     pools = {}
 
-    def train_pools(cap: int | None) -> tuple:
-        if cap not in pools:
+    def train_pools(cap: int | None, used: tuple[str, ...]) -> tuple:
+        if (cap, used) not in pools:
             fit, valid = frames["fit"], frames["valid"]
             if cap:
                 fit = fit.filter(pl.int_range(pl.len()).over("q") < cap)
                 valid = valid.filter(pl.int_range(pl.len()).over("q") < cap)
-            pools[cap] = make_pool(fit, features), make_pool(valid, features)
-        return pools[cap]
+            pools[cap, used] = make_pool(fit, list(used)), make_pool(valid, list(used))
+        return pools[cap, used]
 
     relevant = dev_queries["item_ids"].to_list()
     ref = reference_recall(args.references, dev_queries["query_id"].to_list())
@@ -121,7 +120,12 @@ def main() -> None:
         )
         seeds = variant.get("seeds", [42])
         capped = config.task_type == "GPU" and config.loss_function not in POINTWISE
-        fit_pool, valid_pool = train_pools(GPU_MAX_GROUP if capped else None)
+        unknown = set(variant.get("drop", [])) - set(features)
+        if unknown:
+            raise SystemExit(f"{name}: unknown features {sorted(unknown)}")
+        used = tuple(f for f in features if f not in variant.get("drop", []))
+        fit_pool, valid_pool = train_pools(GPU_MAX_GROUP if capped else None, used)
+        dev_pool = make_pool(dev_frame, list(used))
         runs, probabilities = [], []
         for seed in seeds:
             t = time.perf_counter()
@@ -139,15 +143,36 @@ def main() -> None:
             print(f"{name} seed {seed}: {recall.mean():.5f} in {train_s:.0f}s", flush=True)
             runs[-1]["_recall"] = recall
         seed_mean = np.mean([r.pop("_recall") for r in runs], axis=0)
+        np.save(out_dir / f"{name}_seed_mean.npy", seed_mean)
         entry = {
             "variant": variant,
             "config": dataclasses.asdict(config),
+            "features": list(used),
             "train_group_cap": GPU_MAX_GROUP if capped else None,
             "runs": runs,
             "seed_mean": compare(seed_mean, ref),
         }
         if len(seeds) > 1:
-            entry["ensemble"] = compare(dev_recall(np.mean(probabilities, axis=0)), ref)
+            ensemble = dev_recall(np.mean(probabilities, axis=0))
+            np.save(out_dir / f"{name}_ensemble.npy", ensemble)
+            entry["ensemble"] = compare(ensemble, ref)
+        if "baseline" in variant:
+            base = variant["baseline"]
+            entry["vs_baseline"] = {
+                kind: paired_bootstrap(
+                    np.load(out_dir / f"{name}_{kind}.npy"),
+                    np.load(out_dir / f"{base}_{kind}.npy"),
+                )
+                for kind in ("seed_mean", "ensemble")
+                if (out_dir / f"{base}_{kind}.npy").exists()
+                and (out_dir / f"{name}_{kind}.npy").exists()
+            }
+            for kind, result in entry["vs_baseline"].items():
+                print(
+                    f"{name} vs {base} {kind}: {result['diff'] * 100:+.2f} "
+                    f"[{result['ci95'][0] * 100:+.2f}; {result['ci95'][1] * 100:+.2f}]",
+                    flush=True,
+                )
         results[name] = entry
         summary = entry.get("ensemble", entry["seed_mean"])
         print(

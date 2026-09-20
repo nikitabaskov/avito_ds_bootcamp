@@ -1,0 +1,3 @@
+[
+  {"name": "core_geo", "seeds": [42, 43, 44], "drop": ["filt_vid", "filt_tip", "filt_share"]}
+]

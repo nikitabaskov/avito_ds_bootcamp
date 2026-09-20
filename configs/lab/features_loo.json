@@ -1,0 +1,8 @@
+[
+  {"name": "all", "seeds": [42, 43, 44], "drop": []},
+  {"name": "drop_damp", "seeds": [42, 43, 44], "drop": ["geo_unreliable", "log_dist_clean"], "baseline": "all"},
+  {"name": "drop_nb", "seeds": [42, 43, 44], "drop": ["nb_cos", "nb_cos_rank"], "baseline": "all"},
+  {"name": "drop_trans", "seeds": [42, 43, 44], "drop": ["trans_prob", "trans_pairs", "trans_support", "trans_unknown", "trans_lift", "trans_targets", "trans_outside_share"], "baseline": "all"},
+  {"name": "drop_geofull", "seeds": [42, 43, 44], "drop": ["hist_dist_km", "hist_spread_km"], "baseline": "all"},
+  {"name": "drop_fields", "seeds": [42, 43, 44], "drop": ["bm25_title", "bm25_params", "bm25_description"], "baseline": "all"}
+]
